@@ -4,5 +4,10 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- Required to reach tum.live and the video edge servers. Without this a
+	     release build sandboxes away all outgoing network access and every
+	     request fails, while debug builds work fine. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
 </dict>
 </plist>

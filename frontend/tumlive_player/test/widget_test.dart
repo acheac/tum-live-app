@@ -13,7 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:video_player/video_player.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
-import 'package:tumlive_player/main.dart';
+import 'package:tumlive_player/src/player/lecture_player.dart';
 
 /// Fake platform implementation: never touches the network. Each test decides
 /// whether initialization succeeds or fails.
@@ -178,10 +178,23 @@ double controlBarOpacity(WidgetTester tester) => tester
 void main() {
   late _FakeVideoPlayerPlatform fake;
 
-  /// Installs the fake platform, pumps the app, and lets create() settle.
+  /// Installs the fake platform, pumps the player, and lets create() settle.
+  ///
+  /// Pumps [LecturePlayer] rather than the whole app: the player takes a plain
+  /// URL and knows nothing about the API, so these tests need no fake HTTP
+  /// client. Resolving a lecture id into a URL is PlayerPage's job and is
+  /// tested separately.
   Future<void> pumpApp(WidgetTester tester) async {
     VideoPlayerPlatform.instance = fake;
-    await tester.pumpWidget(const TumLiveApp());
+    await tester.pumpWidget(
+      const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: LecturePlayer(
+          videoUrl: 'https://example.invalid/playlist.m3u8',
+          title: 'TUMLive Player',
+        ),
+      ),
+    );
     await tester.pump(); // let the createWithOptions future land
   }
 
