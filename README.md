@@ -118,7 +118,9 @@ await fetch('/api/v2/auth/token', {method: 'POST', credentials: 'include'})
 
 The WebView attaches the cookie itself, so the app never reads it. gocast's
 cookie is `HttpOnly` — that stops mattering entirely. Nothing long-lived is
-written to our own storage, and the jar is platform-managed.
+written to our own storage. The jar lives in the app's sandbox container
+(`Library/Cookies/` on macOS), protected by the sandbox and file
+permissions — not the Keychain.
 
 It also gives **silent renewal**: `mint()` retries once through `/saml/out`
 before giving up. Worth noting a server-side auth broker *could not* do this —

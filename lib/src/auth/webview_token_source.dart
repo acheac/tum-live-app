@@ -18,8 +18,10 @@
 /// The WebView attaches the cookie itself. We only ever see the 15-minute
 /// access token that comes back. Three problems disappear at once: `HttpOnly`
 /// stops mattering, nothing long-lived is written to our own storage, and the
-/// cookie lives in the platform's own jar — Keychain-backed on Apple platforms,
-/// app-private on Android.
+/// cookie lives in the platform's own cookie store, inside the app's sandbox
+/// container — on macOS that is `Library/Cookies/Cookies.binarycookies`. That is
+/// the sandbox and file permissions protecting it, **not** the Keychain. Better
+/// than a plaintext value in our own preferences, but not secret storage.
 ///
 /// # Silent renewal
 ///
