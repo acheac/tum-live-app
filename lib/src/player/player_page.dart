@@ -1,12 +1,15 @@
-/// Turns `(courseSlug, lectureId)` into a playing video.
+/// Turns `(courseSlug, lectureId)` into a playing video, with the rest of the
+/// course listed underneath.
 ///
 /// This is the layer that exists because **playlist URLs expire**. gocast signs
 /// them with a JWT that lives about seven hours, so the app stores lecture ids
 /// and resolves a fresh URL immediately before playback. Never the other way
-/// round — that is what made the old hardcoded link rot every day.
+/// round — that is what made an early hardcoded link rot every day.
 ///
-/// It also owns the two things that need the network while you watch: resuming
-/// where you left off, and reporting progress back.
+/// Layout follows the phone video-app convention: the picture sits in a 16:9
+/// slot at the top with its controls overlaid, and everything else scrolls
+/// below it. In landscape the picture takes the whole screen, because that is
+/// the only reason to turn a phone sideways.
 library;
 
 import 'dart:async';
@@ -19,6 +22,7 @@ import '../api/tum_live_api.dart';
 import '../app_scope.dart';
 import '../auth/auth_controller.dart';
 import '../common/async_builder.dart';
+import '../common/formatting.dart';
 import 'lecture_player.dart';
 
 class PlayerPage extends StatefulWidget {
@@ -32,19 +36,27 @@ class PlayerPage extends StatefulWidget {
   final String courseSlug;
   final int lectureId;
 
-  /// Shown in the app bar while the lecture itself is still loading.
+  /// Shown while the lecture itself is still loading.
   final String? courseName;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
 }
 
-/// Everything the player needs to start, fetched in one go.
+/// Everything the page needs, fetched together.
 class _Playback {
-  const _Playback({required this.lecture, required this.course, this.resumeAt});
+  const _Playback({
+    required this.lecture,
+    required this.course,
+    required this.siblings,
+    this.resumeAt,
+  });
 
   final Lecture lecture;
   final Course course;
+
+  /// The other lectures in this course, for the list below the player.
+  final List<PlaylistEntry> siblings;
   final Duration? resumeAt;
 }
 
@@ -56,7 +68,6 @@ class _PlayerPageState extends State<PlayerPage> {
   /// updated locally so switching camera angles does not lose your place.
   Duration? _resumeTarget;
 
-  /// Last position we told the server about, and when.
   DateTime _lastReport = DateTime.fromMillisecondsSinceEpoch(0);
   Duration _lastPosition = Duration.zero;
 
@@ -72,8 +83,7 @@ class _PlayerPageState extends State<PlayerPage> {
   AuthController? _auth;
 
   // The first load happens here, not in initState: reading an InheritedWidget
-  // registers a dependency, and initState is too early for that. Caching the
-  // two objects first means _load() never has to touch `context` at all.
+  // registers a dependency, and initState is too early for that.
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -91,7 +101,6 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Future<_Playback> _load() async {
-    // Set by didChangeDependencies before this can ever run.
     final TumLiveApi api = _api!;
     final AuthController auth = _auth!;
 
@@ -99,6 +108,12 @@ class _PlayerPageState extends State<PlayerPage> {
       widget.courseSlug,
       widget.lectureId,
     );
+
+    // The sibling list and the stored progress are both optional garnish, so
+    // they run together and neither can block playback.
+    final List<PlaylistEntry> siblings = await api
+        .getLecturePlaylist(widget.courseSlug, widget.lectureId)
+        .catchError((Object _) => const <PlaylistEntry>[]);
 
     Duration? resumeAt;
     if (auth.isSignedIn) {
@@ -120,6 +135,7 @@ class _PlayerPageState extends State<PlayerPage> {
     return _Playback(
       lecture: result.lecture,
       course: result.course,
+      siblings: siblings,
       resumeAt: _resumeTarget,
     );
   }
@@ -128,6 +144,22 @@ class _PlayerPageState extends State<PlayerPage> {
     setState(() {
       _future = _load();
     });
+  }
+
+  /// Opens another lecture from the same course, replacing this page so the
+  /// back button returns to the course rather than walking a chain of players.
+  void _openSibling(PlaylistEntry entry, Course course) {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute<void>(
+        builder: (_) => PlayerPage(
+          courseSlug: entry.courseSlug.isNotEmpty
+              ? entry.courseSlug
+              : widget.courseSlug,
+          lectureId: entry.lectureId,
+          courseName: course.name,
+        ),
+      ),
+    );
   }
 
   /// Remembers the position and, at most every [_reportInterval], tells the
@@ -169,48 +201,150 @@ class _PlayerPageState extends State<PlayerPage> {
       onRetry: _reload,
       loading: Scaffold(
         backgroundColor: Colors.black,
-        appBar: AppBar(
-          title: Text(widget.courseName ?? 'Loading…'),
-          backgroundColor: Colors.blueGrey[900],
-          foregroundColor: Colors.white,
-        ),
-        body: const Center(
-          child: CircularProgressIndicator(color: Colors.white),
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const CircularProgressIndicator(color: Colors.white),
+              if (widget.courseName != null) ...<Widget>[
+                const SizedBox(height: 16),
+                Text(
+                  widget.courseName!,
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
-      builder: (BuildContext context, _Playback data) {
-        final Map<LectureSource, String> sources =
-            data.lecture.availableSources;
-        if (sources.isEmpty) {
-          return Scaffold(
-            appBar: AppBar(title: Text(data.lecture.displayName)),
-            body: const EmptyView(
-              icon: Icons.videocam_off_outlined,
-              message: 'This lecture has no recording yet.',
-            ),
-          );
-        }
+      builder: (BuildContext context, _Playback data) => _buildLoaded(data),
+    );
+  }
 
-        // Fall back to whatever source exists if the chosen one is missing.
-        final LectureSource source = sources.containsKey(_source)
-            ? _source
-            : sources.keys.first;
+  Widget _buildLoaded(_Playback data) {
+    final Map<LectureSource, String> sources = data.lecture.availableSources;
+    if (sources.isEmpty) {
+      return Scaffold(
+        appBar: AppBar(title: Text(data.lecture.displayName)),
+        body: const EmptyView(
+          icon: Icons.videocam_off_outlined,
+          message: 'This lecture has no recording yet.',
+        ),
+      );
+    }
 
-        return LecturePlayer(
-          // Rebuilding with a new URL is how a source switch reaches the
-          // player; the key keeps state per source rather than per page.
-          key: ValueKey<String>('${data.lecture.id}-${source.name}'),
-          videoUrl: sources[source]!,
-          title: data.lecture.displayName,
-          subtitle: data.course.name,
-          startAt: data.resumeAt,
-          onPositionChanged: _handlePosition,
-          onRetry: _reload,
-          extraControls: <Widget>[
-            if (sources.length > 1) _buildSourceSwitcher(sources, source),
+    // Fall back to whatever source exists if the chosen one is missing.
+    final LectureSource source = sources.containsKey(_source)
+        ? _source
+        : sources.keys.first;
+
+    final Widget player = LecturePlayer(
+      // Rebuilding with a new URL is how a source switch reaches the player;
+      // the key keeps state per source rather than per page.
+      key: ValueKey<String>('${data.lecture.id}-${source.name}'),
+      videoUrl: sources[source]!,
+      title: data.lecture.displayName,
+      subtitle: data.course.name,
+      startAt: data.resumeAt,
+      onPositionChanged: _handlePosition,
+      onRetry: _reload,
+      onBack: () => Navigator.of(context).maybePop(),
+      extraControls: <Widget>[
+        if (sources.length > 1) _buildSourceSwitcher(sources, source),
+      ],
+    );
+
+    // Sideways means "I want the video bigger", so give it everything.
+    final bool landscape =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
+    if (landscape) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(child: player),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          children: <Widget>[
+            AspectRatio(aspectRatio: 16 / 9, child: player),
+            Expanded(child: _buildDetails(data)),
           ],
-        );
-      },
+        ),
+      ),
+    );
+  }
+
+  /// Title, meta, and the rest of the course.
+  Widget _buildDetails(_Playback data) {
+    final ThemeData theme = Theme.of(context);
+    final List<PlaylistEntry> siblings = data.siblings
+        .where((PlaylistEntry e) => e.lectureId != data.lecture.id)
+        .toList(growable: false);
+
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 24),
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                data.lecture.displayName,
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                <String>[
+                  data.course.name,
+                  if (data.lecture.start != null)
+                    formatLectureDate(data.lecture.start),
+                  if (data.lecture.duration > Duration.zero)
+                    formatDuration(data.lecture.duration),
+                ].join(' · '),
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 24),
+        if (siblings.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Text('No other lectures in this course.'),
+          )
+        else ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  Icons.playlist_play,
+                  size: 18,
+                  color: theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'More in this course',
+                  style: theme.textTheme.titleSmall,
+                ),
+                const Spacer(),
+                Text('${siblings.length}', style: theme.textTheme.bodySmall),
+              ],
+            ),
+          ),
+          const SizedBox(height: 4),
+          for (final PlaylistEntry entry in siblings)
+            _SiblingTile(
+              entry: entry,
+              onTap: () => _openSibling(entry, data.course),
+            ),
+        ],
+      ],
     );
   }
 
@@ -239,6 +373,59 @@ class _PlayerPageState extends State<PlayerPage> {
         padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Icon(Icons.switch_video_outlined, color: Colors.white, size: 20),
       ),
+    );
+  }
+}
+
+/// One row in the "more in this course" list.
+class _SiblingTile extends StatelessWidget {
+  const _SiblingTile({required this.entry, required this.onTap});
+
+  final PlaylistEntry entry;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return ListTile(
+      dense: true,
+      leading: CircleAvatar(
+        radius: 16,
+        backgroundColor: entry.liveNow
+            ? theme.colorScheme.error
+            : theme.colorScheme.primaryContainer,
+        child: Icon(
+          entry.liveNow
+              ? Icons.sensors
+              : entry.watched
+              ? Icons.check
+              : Icons.play_arrow,
+          size: 16,
+          color: entry.liveNow
+              ? theme.colorScheme.onError
+              : theme.colorScheme.onPrimaryContainer,
+        ),
+      ),
+      title: Text(
+        entry.displayName,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: theme.textTheme.bodyMedium,
+      ),
+      subtitle: entry.isStarted
+          ? Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  value: entry.progress,
+                  minHeight: 3,
+                  backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                ),
+              ),
+            )
+          : null,
+      onTap: onTap,
     );
   }
 }

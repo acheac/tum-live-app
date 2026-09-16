@@ -145,6 +145,26 @@ class TumLiveApi {
         .toList(growable: false);
   }
 
+  /// The other lectures in this lecture's course, newest first.
+  ///
+  /// Purpose-built by gocast for exactly this ("up next"), so it beats fetching
+  /// the whole course: one request, a listing-shaped payload, and it carries
+  /// watch progress when signed in.
+  Future<List<PlaylistEntry>> getLecturePlaylist(
+    String slug,
+    int lectureId,
+  ) async {
+    final Map<String, dynamic> json = await _getJson(
+      '/streams/$slug/$lectureId/playlist',
+    );
+    final Object? raw = json['entries'];
+    if (raw is! List) return const <PlaylistEntry>[];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(PlaylistEntry.fromJson)
+        .toList(growable: false);
+  }
+
   // -------------------------------------------------------------------------
   // Progress — what makes "continue watching" work
   // -------------------------------------------------------------------------

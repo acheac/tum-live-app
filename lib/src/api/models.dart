@@ -311,6 +311,63 @@ class LectureProgress {
   bool get isStarted => progress > startedThreshold && !watched;
 }
 
+/// One entry in a course's up-next list, from `/streams/{slug}/{id}/playlist`.
+///
+/// Deliberately not a [Lecture]: this endpoint returns a listing shape with no
+/// playlist URLs, which is exactly right — the player resolves a signed URL only
+/// for the lecture actually being opened.
+class PlaylistEntry {
+  const PlaylistEntry({
+    required this.lectureId,
+    required this.courseSlug,
+    required this.name,
+    required this.start,
+    required this.liveNow,
+    required this.watched,
+    required this.progress,
+  });
+
+  factory PlaylistEntry.fromJson(Map<String, dynamic> json) {
+    final Object? p = json['streamProgress'];
+    final double progress = p is Map<String, dynamic>
+        ? _double(p['progress']).clamp(0, 1).toDouble()
+        : 0;
+    return PlaylistEntry(
+      lectureId: _int(json['streamId']),
+      courseSlug: _string(json['courseSlug']),
+      name: _string(json['streamName']),
+      start: _date(json['start']),
+      liveNow: _bool(json['liveNow']),
+      watched: _bool(json['watched']),
+      progress: progress,
+    );
+  }
+
+  final int lectureId;
+  final String courseSlug;
+  final String name;
+  final DateTime? start;
+  final bool liveNow;
+  final bool watched;
+  final double progress;
+
+  /// Most lectures are literally called "Lecture", which is useless in a list.
+  String get displayName {
+    final String trimmed = name.trim();
+    if (trimmed.isEmpty || trimmed.toLowerCase() == 'lecture') {
+      final DateTime? s = start;
+      if (s != null) {
+        final DateTime l = s.toLocal();
+        return 'Lecture — ${l.day}.${l.month}.${l.year}';
+      }
+    }
+    return trimmed.isEmpty ? 'Lecture' : trimmed;
+  }
+
+  bool get isStarted =>
+      progress > LectureProgress.startedThreshold && !watched;
+}
+
 /// A chapter marker inside a lecture.
 class VideoSection {
   const VideoSection({

@@ -69,6 +69,8 @@ class PlayerChrome extends StatefulWidget {
     required this.controller,
     this.onPositionChanged,
     this.extraControls = const <Widget>[],
+    this.title,
+    this.onBack,
   });
 
   final VideoPlayerController controller;
@@ -80,6 +82,12 @@ class PlayerChrome extends StatefulWidget {
   /// Extra buttons for the right-hand side of the control bar, e.g. the
   /// camera-angle switcher.
   final List<Widget> extraControls;
+
+  /// Shown in the overlay across the top of the picture.
+  final String? title;
+
+  /// Back action for the overlay. Null hides the button.
+  final VoidCallback? onBack;
 
   @override
   State<PlayerChrome> createState() => _PlayerChromeState();
@@ -342,6 +350,42 @@ class _PlayerChromeState extends State<PlayerChrome> {
     );
   }
 
+  Widget _buildTopBar() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: <Color>[Color(0xB3000000), Color(0x00000000)],
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(4, 4, 12, 24),
+      child: Row(
+        children: <Widget>[
+          if (widget.onBack != null)
+            IconButton(
+              key: const ValueKey<String>('player-back-button'),
+              onPressed: widget.onBack,
+              color: Colors.white,
+              iconSize: 22,
+              icon: const Icon(Icons.arrow_back),
+            )
+          else
+            const SizedBox(width: 12),
+          if (widget.title != null)
+            Expanded(
+              child: Text(
+                widget.title!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white, fontSize: 14),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSpeedMenu() {
     return PopupMenuButton<double>(
       key: const ValueKey<String>('speed-menu'),
@@ -401,6 +445,23 @@ class _PlayerChromeState extends State<PlayerChrome> {
                   child: AspectRatio(
                     aspectRatio: widget.controller.value.aspectRatio,
                     child: VideoPlayer(widget.controller),
+                  ),
+                ),
+                // Back and title float over the picture rather than sitting in
+                // an app bar above it. On a phone that bar costs ~56dp of
+                // vertical space permanently, which the video needs more.
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  child: AnimatedOpacity(
+                    key: const ValueKey<String>('top-bar'),
+                    opacity: _controlsVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: IgnorePointer(
+                      ignoring: !_controlsVisible,
+                      child: _buildTopBar(),
+                    ),
                   ),
                 ),
                 Positioned(

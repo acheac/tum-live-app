@@ -189,9 +189,15 @@ void main() {
     await tester.pumpWidget(
       const MaterialApp(
         debugShowCheckedModeBanner: false,
-        home: LecturePlayer(
-          videoUrl: 'https://example.invalid/playlist.m3u8',
-          title: 'TUMLive Player',
+        // LecturePlayer is only the picture now: no Scaffold, no AppBar, so it
+        // can sit in a 16:9 slot with a lecture list underneath. Material
+        // widgets inside it still need a Material ancestor, which PlayerPage
+        // provides in the real app.
+        home: Scaffold(
+          body: LecturePlayer(
+            videoUrl: 'https://example.invalid/playlist.m3u8',
+            title: 'TUMLive Player',
+          ),
         ),
       ),
     );
@@ -591,10 +597,17 @@ void main() {
     });
   });
 
-  testWidgets('the app bar always shows the app name', (WidgetTester tester) async {
+  testWidgets('the title is shown over the picture, not in an app bar',
+      (WidgetTester tester) async {
     fake = _FakeVideoPlayerPlatform();
     await pumpApp(tester);
+    fake.completeInitialization();
+    await tester.pumpAndSettle();
 
-    expect(find.widgetWithText(AppBar, 'TUMLive Player'), findsOneWidget);
+    // An app bar would cost ~56dp of height permanently on a phone. The title
+    // rides in the overlay that fades with the rest of the controls instead.
+    expect(find.byType(AppBar), findsNothing);
+    expect(find.text('TUMLive Player'), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('top-bar')), findsOneWidget);
   });
 }

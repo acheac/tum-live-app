@@ -19,8 +19,8 @@ class LecturePlayer extends StatefulWidget {
     required this.videoUrl,
     required this.title,
     this.subtitle,
-    this.appBarActions = const <Widget>[],
     this.extraControls = const <Widget>[],
+    this.onBack,
     this.startAt,
     this.onPositionChanged,
     this.onRetry,
@@ -31,7 +31,9 @@ class LecturePlayer extends StatefulWidget {
 
   final String title;
   final String? subtitle;
-  final List<Widget> appBarActions;
+
+  /// Shown on the back button overlaid on the video. Null hides it.
+  final VoidCallback? onBack;
 
   /// Extra buttons for the control bar, e.g. the camera-angle switcher.
   final List<Widget> extraControls;
@@ -141,49 +143,68 @@ class _LecturePlayerState extends State<LecturePlayer> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Text(widget.title, overflow: TextOverflow.ellipsis),
-            if (widget.subtitle != null)
-              Text(
-                widget.subtitle!,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, color: Colors.white70),
+    // Just the picture, filling whatever box the parent gives it. Sizing is the
+    // host page's job — a 16:9 slot in portrait, the whole screen in landscape —
+    // so the player itself stays layout-agnostic and easy to test.
+    final bool hasChrome = !_isError && _controller.value.isInitialized;
+    return ColoredBox(
+      color: Colors.black,
+      child: Stack(
+        children: <Widget>[
+          Positioned.fill(child: Center(child: _buildBody())),
+          // While the video is playing, the back button rides in the chrome's
+          // fading top bar. Loading and failure states have no chrome, so
+          // without this there is no way out of a lecture that will not load.
+          if (!hasChrome && widget.onBack != null)
+            Positioned(
+              top: 0,
+              left: 0,
+              child: SafeArea(
+                child: IconButton(
+                  key: const ValueKey<String>('player-back-button'),
+                  onPressed: widget.onBack,
+                  color: Colors.white,
+                  iconSize: 22,
+                  icon: const Icon(Icons.arrow_back),
+                ),
               ),
-          ],
-        ),
-        backgroundColor: Colors.blueGrey[900],
-        foregroundColor: Colors.white,
-        actions: widget.appBarActions,
+            ),
+        ],
       ),
-      body: Center(child: _buildBody()),
     );
   }
 
   Widget _buildBody() {
     if (_isError) {
-      return Padding(
-        padding: const EdgeInsets.all(24),
+      // Sized for a 16:9 slot on a phone, which is about 225dp tall — not the
+      // full screen this once assumed. Scrollable and compact so it cannot
+      // overflow whatever box the page gives it.
+      return SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
             const Text(
-              'Could not load the video. The signed link may have expired, '
-              'or the network is unavailable.',
+              'Could not load the video.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.red, fontSize: 18),
+              style: TextStyle(color: Colors.white, fontSize: 15),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 4),
+            const Text(
+              'The signed link may have expired, or the network is '
+              'unavailable.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+            const SizedBox(height: 10),
             FilledButton.icon(
               key: const ValueKey<String>('retry-button'),
               onPressed: _retry,
-              icon: const Icon(Icons.refresh),
+              icon: const Icon(Icons.refresh, size: 18),
               label: const Text('Retry'),
+              style: FilledButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+              ),
             ),
           ],
         ),
@@ -196,6 +217,8 @@ class _LecturePlayerState extends State<LecturePlayer> {
       controller: _controller,
       onPositionChanged: widget.onPositionChanged,
       extraControls: widget.extraControls,
+      title: widget.title,
+      onBack: widget.onBack,
     );
   }
 }

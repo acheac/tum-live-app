@@ -21,6 +21,7 @@ import 'package:tumlive_player/src/auth/cookie_token_source.dart';
 import 'package:tumlive_player/src/auth/credential_store.dart';
 import 'package:tumlive_player/src/auth/token_source.dart';
 import 'package:tumlive_player/src/home/home_page.dart';
+import 'package:tumlive_player/src/player/lecture_player.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
 /// A stand-in TUM-Live holding one public course with two lectures.
@@ -71,6 +72,25 @@ http.Client fakeTumLive({bool noRecording = false}) {
             lecture(102, '2025-10-21'),
           ],
         },
+      };
+    } else if (path.endsWith('/playlist')) {
+      body = <String, dynamic>{
+        'entries': <dynamic>[
+          <String, dynamic>{
+            'streamId': 102,
+            'courseSlug': 'analysis',
+            'streamName': 'Lecture',
+            'start': '2025-10-21T08:00:00Z',
+            'streamProgress': <String, dynamic>{'progress': 0.4},
+          },
+          <String, dynamic>{
+            'streamId': 101,
+            'courseSlug': 'analysis',
+            'streamName': 'Lecture',
+            'start': '2025-10-14T08:00:00Z',
+            'watched': true,
+          },
+        ],
       };
     } else if (path.contains('/streams/')) {
       final int id = int.parse(path.split('/').last);
@@ -237,7 +257,10 @@ void main() {
       await tester.tap(find.textContaining('21.10.2025'));
       await tester.pumpAndSettle();
 
-      await tester.pageBack();
+      // Not tester.pageBack(): the player has no AppBar to hold a default back
+      // button. Its back affordance is overlaid on the picture instead, and in
+      // the failure state it comes from LecturePlayer rather than the chrome.
+      await tester.tap(find.byKey(const ValueKey<String>('player-back-button')));
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
@@ -274,6 +297,57 @@ void main() {
     expect(auth.status, AuthStatus.restoring, reason: 'probe still in flight');
     expect(find.text('Analysis for Informatics'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('the player lists the rest of the course underneath',
+      (WidgetTester tester) async {
+    // The default test surface is 800x600 — landscape — where the page gives
+    // the whole screen to the video by design. Force a phone-shaped window.
+    // setSurfaceSize does not reach MediaQuery here; setting the view does.
+    tester.view.physicalSize = const Size(400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    VideoPlayerPlatform.instance = _FailingVideoPlatform();
+
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pumpAndSettle();
+
+    // The lecture being watched is 102, so only 101 belongs in "more in this
+    // course" — a playlist that lists the video you are already on is noise.
+    expect(find.text('More in this course'), findsOneWidget);
+    expect(find.textContaining('14.10.2025'), findsOneWidget);
+
+    // And the video sits in a fixed 16:9 slot rather than filling the screen,
+    // which is what leaves room for the list.
+    final AspectRatio slot = tester.widget<AspectRatio>(
+      find
+          .ancestor(
+            of: find.byType(LecturePlayer),
+            matching: find.byType(AspectRatio),
+          )
+          .first,
+    );
+    expect(slot.aspectRatio, closeTo(16 / 9, 0.001));
+  });
+
+  testWidgets('landscape gives the whole screen to the video',
+      (WidgetTester tester) async {
+    // 800x600 is already landscape, which is the case under test.
+    VideoPlayerPlatform.instance = _FailingVideoPlatform();
+
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pumpAndSettle();
+
+    // Turning the phone sideways means "make the video bigger", so the lecture
+    // list gets out of the way entirely.
+    expect(find.byType(LecturePlayer), findsOneWidget);
+    expect(find.text('More in this course'), findsNothing);
   });
 
   testWidgets('the home screen retry button reloads without throwing',
