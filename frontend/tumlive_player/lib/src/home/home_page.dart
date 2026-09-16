@@ -103,7 +103,16 @@ class _HomePageState extends State<HomePage> {
   Future<T> _safe<T>(Future<T> future, T fallback) =>
       future.catchError((Object _) => fallback);
 
-  void _reload() => setState(() => _future = _load());
+  /// Re-runs the request behind [_future].
+  ///
+  /// The body must be a block, not an arrow. `setState(() => _future = _load())`
+  /// returns the assignment's value — a Future — and setState rejects a callback
+  /// that returns one.
+  void _reload() {
+    setState(() {
+      _future = _load();
+    });
+  }
 
   void _pickSemester(Semester semester) {
     setState(() {

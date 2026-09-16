@@ -70,7 +70,16 @@ class _CoursePageState extends State<CoursePage> {
     return _CourseData(course: course, progress: progress);
   }
 
-  void _reload() => setState(() => _future = _load());
+  /// Re-runs the request behind [_future].
+  ///
+  /// The body must be a block, not an arrow. `setState(() => _future = _load())`
+  /// returns the assignment's value — a Future — and setState rejects a callback
+  /// that returns one.
+  void _reload() {
+    setState(() {
+      _future = _load();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {

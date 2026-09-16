@@ -217,6 +217,53 @@ void main() {
       expect(find.textContaining('Could not load the video'), findsOneWidget);
       expect(find.byKey(const ValueKey<String>('retry-button')), findsOneWidget);
     });
+
+    // Regression: leaving the player calls CoursePage._reload() to pick up the
+    // progress you just made. That was written as
+    // `setState(() => _future = _load())`, whose arrow body returns the
+    // assignment's value — a Future — which setState rejects. It threw on every
+    // single back-navigation and no test went this far.
+    testWidgets('leaving the player returns to the lecture list',
+        (WidgetTester tester) async {
+      VideoPlayerPlatform.instance = _FailingVideoPlatform();
+
+      await pumpApp(tester, fakeTumLive());
+
+      await tester.tap(find.text('Analysis for Informatics'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('21.10.2025'));
+      await tester.pumpAndSettle();
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      // Back on the course page, with the list reloaded.
+      expect(find.textContaining('21.10.2025'), findsOneWidget);
+      expect(find.textContaining('14.10.2025'), findsOneWidget);
+    });
+  });
+
+  testWidgets('the home screen retry button reloads without throwing',
+      (WidgetTester tester) async {
+    // HomePage._reload() had the same arrow-bodied setState bug.
+    bool fail = true;
+    final http.Client flaky = MockClient((http.Request request) async {
+      if (fail) return http.Response('boom', 500);
+      return await fakeTumLive().send(
+        http.Request(request.method, request.url)..headers.addAll(request.headers),
+      ).then((http.StreamedResponse r) => http.Response.fromStream(r));
+    });
+
+    await pumpApp(tester, flaky);
+    expect(find.text('Try again'), findsOneWidget);
+
+    fail = false;
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Analysis for Informatics'), findsOneWidget);
   });
 }
 
