@@ -12,7 +12,9 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:tumlive_player/src/api/api_exception.dart';
 import 'package:tumlive_player/src/auth/auth_controller.dart';
+import 'package:tumlive_player/src/auth/cookie_token_source.dart';
 import 'package:tumlive_player/src/auth/credential_store.dart';
+import 'package:tumlive_player/src/auth/token_source.dart';
 
 /// Records what the controller asked for, and answers plausibly.
 class FakeServer {
@@ -77,7 +79,13 @@ void main() {
   late MemoryCredentialStore store;
   late AuthController auth;
 
-  AuthController build() => AuthController(store: store, client: server.client);
+  // The pasted-cookie source is the one these tests exercise: it is the path
+  // with observable HTTP, and the token lifecycle under test lives in
+  // AuthController regardless of which source is underneath.
+  AuthController build() => AuthController(
+    source: CookieTokenSource(store: store, client: server.client),
+    client: server.client,
+  );
 
   setUp(() {
     server = FakeServer();
@@ -247,4 +255,84 @@ void main() {
   test('the SSO url points at the SAML entry point', () {
     expect(auth.ssoUrl.toString(), 'https://tum.live/saml/out');
   });
+
+  group('token source selection', () {
+    test('the cookie source cannot run sign-in itself', () {
+      expect(auth.supportsInteractiveLogin, isFalse);
+    });
+
+    test('a source that signs in itself reports so', () {
+      final AuthController webViewish = AuthController(
+        source: _InteractiveSource(),
+        client: server.client,
+      );
+      expect(webViewish.supportsInteractiveLogin, isTrue);
+    });
+
+    test('pasting a cookie is refused where sign-in is interactive', () async {
+      final AuthController webViewish = AuthController(
+        source: _InteractiveSource(),
+        client: server.client,
+      );
+      await expectLater(
+        webViewish.signInWithSessionCookie('anything'),
+        throwsA(isA<UnsupportedError>()),
+      );
+    });
+
+    test('AuthController still caches tokens from a non-cookie source',
+        () async {
+      final _InteractiveSource source = _InteractiveSource();
+      final AuthController webViewish = AuthController(
+        source: source,
+        client: server.client,
+      );
+
+      final String? a = await webViewish.bearerToken();
+      final String? b = await webViewish.bearerToken();
+
+      expect(a, isNotNull);
+      expect(b, a);
+      // The caching lives in AuthController, so it must hold for any source.
+      expect(source.mintCalls, 1);
+    });
+
+    test('a source with no session leaves the app browsing anonymously',
+        () async {
+      final AuthController webViewish = AuthController(
+        source: _InteractiveSource(hasSession: false),
+        client: server.client,
+      );
+
+      await webViewish.restore();
+
+      expect(webViewish.status, AuthStatus.signedOut);
+      expect(await webViewish.bearerToken(), isNull);
+    });
+  });
+}
+
+/// Stands in for the WebView source, which cannot run under `flutter test`.
+/// What matters here is that AuthController treats any TokenSource the same.
+class _InteractiveSource implements TokenSource {
+  _InteractiveSource({this.hasSession = true});
+
+  final bool hasSession;
+  int mintCalls = 0;
+
+  @override
+  bool get supportsInteractiveLogin => true;
+
+  @override
+  Future<AccessToken?> mint() async {
+    mintCalls++;
+    if (!hasSession) return null;
+    return const AccessToken('webview-token', Duration(minutes: 15));
+  }
+
+  @override
+  Future<void> clear() async {}
+
+  @override
+  void dispose() {}
 }

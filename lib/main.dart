@@ -23,12 +23,16 @@
 /// [TumLiveApi]; anything that draws goes in a feature folder.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'src/api/tum_live_api.dart';
 import 'src/app_scope.dart';
 import 'src/auth/auth_controller.dart';
+import 'src/auth/cookie_token_source.dart';
 import 'src/auth/credential_store.dart';
+import 'src/auth/token_source.dart';
+import 'src/auth/webview_token_source.dart';
 import 'src/home/home_page.dart';
 
 void main() => runApp(const TumLiveApp());
@@ -55,11 +59,33 @@ class _TumLiveAppState extends State<TumLiveApp> {
   @override
   void initState() {
     super.initState();
-    _auth = AuthController(store: SharedPreferencesCredentialStore());
+    _auth = AuthController(source: _buildTokenSource());
     // The API client asks the auth controller for a token before every request.
     // That one line is the entire coupling between the two layers.
     _api = TumLiveApi(tokenProvider: _auth.bearerToken);
     _auth.restore();
+  }
+
+  /// Picks how this platform holds a TUM-Live session.
+  ///
+  /// Anywhere with a WebView, the WebView's own cookie jar is the session store:
+  /// the user signs in on TUM's real login page and nothing long-lived is
+  /// written to our storage. Linux has no WebView implementation, so it falls
+  /// back to a cookie the user fetches from a browser.
+  static TokenSource _buildTokenSource() {
+    if (!kIsWeb) {
+      switch (defaultTargetPlatform) {
+        case TargetPlatform.android:
+        case TargetPlatform.iOS:
+        case TargetPlatform.macOS:
+        case TargetPlatform.windows:
+          return WebViewTokenSource();
+        case TargetPlatform.linux:
+        case TargetPlatform.fuchsia:
+          break;
+      }
+    }
+    return CookieTokenSource(store: SharedPreferencesCredentialStore());
   }
 
   @override

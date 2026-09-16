@@ -1,13 +1,10 @@
-/// Sign-in screen.
+/// Fallback sign-in, for platforms with no WebView (Linux today).
 ///
-/// TUM-Live authenticates with SAML single sign-on, so there is nothing for us
-/// to POST a password to — and asking for a TUM password in a third-party app
-/// would be wrong even if it worked. The user authenticates in a real browser
-/// and brings back the session cookie.
+/// The user completes SSO in a real browser and copies the `jwt` cookie across.
+/// Clumsy, but it needs no plugins and works anywhere.
 ///
-/// **This paste step is the prototype's one deliberate placeholder.** See
-/// [AuthController.signInWithSessionCookie] for how to replace it with a
-/// WebView flow once you target phones.
+/// Everywhere else the app shows [WebViewLoginPage] instead, which is both nicer
+/// and safer — see [AuthController] for why there is no password form.
 library;
 
 import 'package:flutter/material.dart';
@@ -17,14 +14,14 @@ import '../api/api_exception.dart';
 import '../app_scope.dart';
 import 'auth_controller.dart';
 
-class LoginPage extends StatefulWidget {
-  const LoginPage({super.key});
+class CookieLoginPage extends StatefulWidget {
+  const CookieLoginPage({super.key});
 
   @override
-  State<LoginPage> createState() => _LoginPageState();
+  State<CookieLoginPage> createState() => _CookieLoginPageState();
 }
 
-class _LoginPageState extends State<LoginPage> {
+class _CookieLoginPageState extends State<CookieLoginPage> {
   final TextEditingController _cookieField = TextEditingController();
   bool _busy = false;
   String? _error;
@@ -189,9 +186,9 @@ class _LoginPageState extends State<LoginPage> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Prototype note: copying a cookie by hand is a stand-in. '
-                        'On phones this step becomes a WebView that completes '
-                        'sign-in inside the app.',
+                        'This platform has no in-app browser, so the cookie has '
+                        'to come across by hand. Other platforms sign in '
+                        'directly in the app.',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.outline,
                         ),

@@ -16,6 +16,7 @@ import 'package:tumlive_player/src/api/models.dart';
 import 'package:tumlive_player/src/api/tum_live_api.dart';
 import 'package:tumlive_player/src/app_scope.dart';
 import 'package:tumlive_player/src/auth/auth_controller.dart';
+import 'package:tumlive_player/src/auth/cookie_token_source.dart';
 import 'package:tumlive_player/src/auth/credential_store.dart';
 import 'package:tumlive_player/src/home/home_page.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
@@ -106,7 +107,7 @@ http.Client fakeTumLive({bool noRecording = false}) {
 /// Boots the app's real widget tree against [client].
 Future<AuthController> pumpApp(WidgetTester tester, http.Client client) async {
   final AuthController auth = AuthController(
-    store: MemoryCredentialStore(),
+    source: CookieTokenSource(store: MemoryCredentialStore(), client: client),
     client: client,
   );
   // No stored cookie: settles straight into signedOut, which is the state a
