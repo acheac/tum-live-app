@@ -124,27 +124,16 @@ class _TumLiveAppState extends State<TumLiveApp> {
             ),
           ),
         ),
-        home: ListenableBuilder(
-          listenable: _auth,
-          builder: (BuildContext context, Widget? child) {
-            // Reading a stored session takes a round trip. Showing the home
-            // screen first would flash "signed out" at a user who is not.
-            if (_auth.status == AuthStatus.restoring) {
-              return const _SplashScreen();
-            }
-            return const HomePage();
-          },
-        ),
+        // Deliberately not gated on the session check. Public courses need no
+        // authentication, and probing the session can take seconds — booting a
+        // WebView, and possibly a silent SSO round trip. Blocking the UI on that
+        // means a blank spinner on every launch, and a permanent one if the
+        // WebView never comes up. So: show the app immediately, and let
+        // restore() flip it to signed-in whenever it lands. HomePage already
+        // reloads when isSignedIn changes.
+        home: const HomePage(),
       ),
     );
   }
 }
 
-class _SplashScreen extends StatelessWidget {
-  const _SplashScreen();
-
-  @override
-  Widget build(BuildContext context) => const Scaffold(
-    body: Center(child: CircularProgressIndicator.adaptive()),
-  );
-}

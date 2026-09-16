@@ -51,12 +51,14 @@ class WebViewTokenSource implements TokenSource {
   Future<InAppWebViewController?>? _startup;
   Completer<void>? _pageLoad;
 
-  /// How long to wait for any single navigation to settle.
-  static const Duration _navigationTimeout = Duration(seconds: 25);
+  /// How long to wait for any single navigation to settle. Kept short: this
+  /// runs in the background now, but a stuck WebView should still give up
+  /// rather than pin a request for half a minute.
+  static const Duration _navigationTimeout = Duration(seconds: 12);
 
   /// How long to let a SAML round trip bounce between hosts before deciding it
   /// needs the user.
-  static const Duration _ssoTimeout = Duration(seconds: 20);
+  static const Duration _ssoTimeout = Duration(seconds: 12);
 
   @override
   bool get supportsInteractiveLogin => true;

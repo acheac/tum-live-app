@@ -61,6 +61,9 @@ class AuthController extends ChangeNotifier {
   /// dies in flight.
   static const Duration _refreshMargin = Duration(minutes: 2);
 
+  /// How long an API call will wait for a token before going out anonymously.
+  static const Duration _mintTimeout = Duration(seconds: 3);
+
   AuthStatus _status = AuthStatus.restoring;
   AuthStatus get status => _status;
 
@@ -97,7 +100,7 @@ class AuthController extends ChangeNotifier {
     _accessToken = null;
     _accessTokenExpiry = null;
     try {
-      final String? token = await bearerToken();
+      final String? token = await _acquireToken();
       if (token == null) {
         _setStatus(AuthStatus.signedOut);
         return;
@@ -129,7 +132,15 @@ class AuthController extends ChangeNotifier {
     _accessTokenExpiry = null;
 
     // Verify before claiming success, so a bad paste cannot leave the app stuck.
+    //
+    // Minting has to be checked explicitly: bearerToken() deliberately falls
+    // back to an anonymous request, so a successful /users/me proves nothing
+    // about the cookie on its own.
     try {
+      final String? token = await _acquireToken();
+      if (token == null) {
+        throw ApiException(401, 'That session cookie was rejected.');
+      }
       _user = await _fetchUser();
     } on Object {
       await source.clear();
@@ -150,18 +161,48 @@ class AuthController extends ChangeNotifier {
   ///
   /// Returns null when signed out — callers treat that as "make the request
   /// anonymously", which is exactly right for public courses.
-  Future<String?> bearerToken() async {
+  Future<String?> bearerToken() {
+    final String? cached = _cachedToken();
+    if (cached != null) return Future<String?>.value(cached);
+
+    // Bounded on purpose. TumLiveApi awaits this before *every* request, so a
+    // slow session probe — booting a WebView, or a silent SSO round trip — would
+    // otherwise hold up calls that work perfectly well without a token. Public
+    // courses need no authentication, so after [_mintTimeout] we go out
+    // anonymously and let the mint finish in the background; when it lands,
+    // listeners reload with authenticated data.
+    return _sharedMint().timeout(_mintTimeout, onTimeout: () => null);
+  }
+
+  /// Same, but willing to wait. Used by the session probe, which is allowed to
+  /// be slow because nothing is blocked on it.
+  Future<String?> _acquireToken() {
+    final String? cached = _cachedToken();
+    if (cached != null) return Future<String?>.value(cached);
+    return _sharedMint();
+  }
+
+  String? _cachedToken() {
     final DateTime? expiry = _accessTokenExpiry;
     final bool usable =
         _accessToken != null &&
         expiry != null &&
         DateTime.now().isBefore(expiry.subtract(_refreshMargin));
-    if (usable) return _accessToken;
+    return usable ? _accessToken : null;
+  }
 
-    // Collapse concurrent refreshes into one request.
-    return _pendingMint ??= _mint().whenComplete(() {
-      _pendingMint = null;
-    });
+  /// Collapses concurrent refreshes into one request.
+  ///
+  /// Never throws: a failed mint means "no token", and the caller's job is then
+  /// to make the request anonymously. Letting a dead session throw out of here
+  /// would break browsing public courses, which needs no session at all. The
+  /// cases that matter are still handled — [_mint] signs out on a 401.
+  Future<String?> _sharedMint() {
+    return _pendingMint ??= _mint()
+        .catchError((Object _) => null)
+        .whenComplete(() {
+          _pendingMint = null;
+        });
   }
 
   Future<String?> _mint() async {

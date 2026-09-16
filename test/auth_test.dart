@@ -230,7 +230,11 @@ void main() {
       // The seven-day session cookie expires while the app is open.
       server.tokenStatus = 401;
 
-      await expectLater(auth.bearerToken(), throwsA(isA<ApiException>()));
+      // bearerToken() reports "no token", it does not throw. TumLiveApi calls
+      // it before every request, including ones to public endpoints that need
+      // no token at all — a throw here would break browsing entirely just
+      // because a session lapsed.
+      expect(await auth.bearerToken(), isNull);
 
       // Not just a failed call: the dead session must be cleared, or every
       // later request retries a credential that can never work again.

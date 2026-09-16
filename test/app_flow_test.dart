@@ -5,6 +5,7 @@
 // which the unit tests in api_test.dart cannot: they check that parsing works,
 // this checks that the parsed values reach the pixels.
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -18,6 +19,7 @@ import 'package:tumlive_player/src/app_scope.dart';
 import 'package:tumlive_player/src/auth/auth_controller.dart';
 import 'package:tumlive_player/src/auth/cookie_token_source.dart';
 import 'package:tumlive_player/src/auth/credential_store.dart';
+import 'package:tumlive_player/src/auth/token_source.dart';
 import 'package:tumlive_player/src/home/home_page.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
@@ -245,6 +247,35 @@ void main() {
     });
   });
 
+  // Regression: the app used to render a splash screen until AuthStatus stopped
+  // being `restoring`. With the WebView source that probe boots a browser and can
+  // attempt a silent SSO round trip, so startup blocked for up to two minutes —
+  // and forever if the WebView never came up. Nothing needs authentication to
+  // browse public courses, so nothing should wait for it.
+  testWidgets('the app is usable while the session check is still running',
+      (WidgetTester tester) async {
+    final http.Client client = fakeTumLive();
+    final AuthController auth = AuthController(
+      source: _NeverCompletingSource(),
+      client: client,
+    );
+    // Deliberately not awaited: this is the state during a slow probe.
+    unawaited(auth.restore());
+
+    await tester.pumpWidget(
+      AppScope(
+        api: TumLiveApi(client: client, tokenProvider: auth.bearerToken),
+        auth: auth,
+        child: const MaterialApp(home: HomePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(auth.status, AuthStatus.restoring, reason: 'probe still in flight');
+    expect(find.text('Analysis for Informatics'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
   testWidgets('the home screen retry button reloads without throwing',
       (WidgetTester tester) async {
     // HomePage._reload() had the same arrow-bodied setState bug.
@@ -279,4 +310,21 @@ class _FailingVideoPlatform extends VideoPlayerPlatform {
   Future<int?> createWithOptions(VideoCreationOptions options) async {
     throw PlatformException(code: 'VideoError', message: 'no platform in tests');
   }
+}
+
+/// A session probe that never answers — a WebView that failed to come up.
+class _NeverCompletingSource implements TokenSource {
+  final Completer<AccessToken?> _never = Completer<AccessToken?>();
+
+  @override
+  bool get supportsInteractiveLogin => true;
+
+  @override
+  Future<AccessToken?> mint() => _never.future;
+
+  @override
+  Future<void> clear() async {}
+
+  @override
+  void dispose() {}
 }
