@@ -1,4 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Flutter's template grants INTERNET only in the debug and profile
+         manifests, so release builds ship without it: every request fails and
+         the app looks broken for no visible reason. This app is useless
+         offline, so it belongs here. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
     <application
         android:label="tumlive_player"
         android:name="${applicationName}"
