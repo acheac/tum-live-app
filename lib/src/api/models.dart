@@ -251,14 +251,31 @@ class Lecture {
     if (playlistUrl.isNotEmpty) LectureSource.combined: playlistUrl,
     if (playlistUrlPres.isNotEmpty) LectureSource.presentation: playlistUrlPres,
     if (playlistUrlCam.isNotEmpty) LectureSource.camera: playlistUrlCam,
+    // Fused plays the slides and puts the camera over them, so it needs both.
+    // Its value is the slides, which is the layer underneath; the camera
+    // reaches the player separately as [fusedOverlayUrl].
+    if (playlistUrlPres.isNotEmpty && playlistUrlCam.isNotEmpty)
+      LectureSource.fused: playlistUrlPres,
   };
+
+  /// The camera track [LectureSource.fused] lays over the slides, or null when
+  /// this lecture has no separate camera recording.
+  String? get fusedOverlayUrl =>
+      playlistUrlCam.isEmpty ? null : playlistUrlCam;
 }
 
 /// Which camera angle to play. gocast records up to three per lecture.
+///
+/// [fused] is the exception: the server has no such recording. It is the slides
+/// track with the camera track played over it, composited on the device — see
+/// `LecturePlayer.overlayVideoUrl`. gocast's own combined recording packs both
+/// into one 16:9 frame and pads the rest with black, which wastes about a
+/// quarter of a phone screen held sideways.
 enum LectureSource {
   combined('Combined'),
   presentation('Slides'),
-  camera('Camera');
+  camera('Camera'),
+  fused('Fused (beta)');
 
   const LectureSource(this.label);
 

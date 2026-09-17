@@ -155,12 +155,6 @@ class _HomePageState extends State<HomePage> {
                   child: Text('Sign out'),
                 ),
               ],
-            )
-          else
-            TextButton.icon(
-              onPressed: _openLogin,
-              icon: const Icon(Icons.login),
-              label: const Text('Sign in'),
             ),
         ],
       ),

@@ -10,6 +10,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -22,6 +23,7 @@ import 'package:tumlive_player/src/auth/credential_store.dart';
 import 'package:tumlive_player/src/auth/token_source.dart';
 import 'package:tumlive_player/src/home/home_page.dart';
 import 'package:tumlive_player/src/player/lecture_player.dart';
+import 'package:tumlive_player/src/player/player_page.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
 /// A stand-in TUM-Live holding one public course with two lectures.
@@ -41,6 +43,8 @@ http.Client fakeTumLive({bool noRecording = false}) {
     'end': '${date}T10:00:00Z',
     'duration': 7200,
     'playlistUrl': 'https://edge.example/$id/playlist.m3u8?jwt=signed',
+    'playlistUrlPres': 'https://edge.example/$id/pres.m3u8?jwt=signed',
+    'playlistUrlCam': 'https://edge.example/$id/cam.m3u8?jwt=signed',
     'recording': true,
     'ended': true,
   };
@@ -148,6 +152,11 @@ Future<AuthController> pumpApp(WidgetTester tester, http.Client client) async {
 }
 
 void main() {
+  // The player reads the remembered camera angle before it can build, and
+  // there is no preferences plugin under `flutter test` — without this the
+  // page waits on a future that never lands and every pumpAndSettle times out.
+  setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
   testWidgets('the home screen lists public courses when signed out',
       (WidgetTester tester) async {
     await pumpApp(tester, fakeTumLive());
@@ -301,8 +310,7 @@ void main() {
 
   testWidgets('the player lists the rest of the course underneath',
       (WidgetTester tester) async {
-    // The default test surface is 800x600 — landscape — where the page gives
-    // the whole screen to the video by design. Force a phone-shaped window.
+    // A phone-shaped window, so the 16:9 arithmetic below is worth checking.
     // setSurfaceSize does not reach MediaQuery here; setting the view does.
     tester.view.physicalSize = const Size(400, 900);
     tester.view.devicePixelRatio = 1.0;
@@ -315,27 +323,156 @@ void main() {
     await tester.tap(find.textContaining('21.10.2025'));
     await tester.pumpAndSettle();
 
-    // The lecture being watched is 102, so only 101 belongs in "more in this
-    // course" — a playlist that lists the video you are already on is noise.
+    // Both lectures are listed, the one playing included and marked. Dropping
+    // it made the list shift by a row on every switch and gave no sense of
+    // where in the course you were.
     expect(find.text('More in this course'), findsOneWidget);
     expect(find.textContaining('14.10.2025'), findsOneWidget);
+    expect(find.byKey(const ValueKey('now-playing')), findsOneWidget);
 
     // And the video sits in a fixed 16:9 slot rather than filling the screen,
-    // which is what leaves room for the list.
-    final AspectRatio slot = tester.widget<AspectRatio>(
-      find
-          .ancestor(
-            of: find.byType(LecturePlayer),
-            matching: find.byType(AspectRatio),
-          )
-          .first,
-    );
-    expect(slot.aspectRatio, closeTo(16 / 9, 0.001));
+    // which is what leaves room for the list. The slot is a sized box rather
+    // than an AspectRatio so that the element chain is the same in fullscreen
+    // and the video survives the switch — see PlayerPage.build.
+    final Size slot = tester.getSize(find.byType(LecturePlayer));
+    expect(slot.width, closeTo(400, 0.5));
+    expect(slot.height, closeTo(400 * 9 / 16, 0.5));
   });
 
-  testWidgets('landscape gives the whole screen to the video',
-      (WidgetTester tester) async {
-    // 800x600 is already landscape, which is the case under test.
+  testWidgets('tapping a sibling swaps the lecture without rebuilding the page', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final _WorkingVideoPlatform video = _WorkingVideoPlatform();
+    VideoPlayerPlatform.instance = video;
+
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    video.completeInitialization();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // Playing 102, dated 21.10.
+    expect(find.textContaining('21.10.2025'), findsWidgets);
+    final Element pageBefore = tester.element(find.byType(PlayerPage));
+
+    await tester.tap(find.textContaining('14.10.2025'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    // The swap builds a second controller for the new video — that part is
+    // meant to reload.
+    video.completeInitialization();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // The list is still there throughout — no full-page spinner, no new route.
+    expect(find.text('More in this course'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    // The same PlayerPage element throughout: no pushReplacement, no rebuild
+    // of the screen. The video inside it is a different controller, which is
+    // the part that is supposed to change.
+    expect(find.byType(PlayerPage), findsOneWidget);
+    expect(
+      identical(tester.element(find.byType(PlayerPage)), pageBefore),
+      isTrue,
+    );
+    // And the marker moved to the lecture now playing.
+    expect(find.byKey(const ValueKey('now-playing')), findsOneWidget);
+    // Which is the animated one, and only on that row.
+    expect(find.byKey(const ValueKey('playing-bars')), findsOneWidget);
+  });
+
+  testWidgets('back leaves fullscreen first and the lecture second', (
+    WidgetTester tester,
+  ) async {
+    final _WorkingVideoPlatform video = _WorkingVideoPlatform();
+    VideoPlayerPlatform.instance = video;
+
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    video.completeInitialization();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.byKey(const ValueKey('fullscreen-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('More in this course'), findsNothing);
+
+    // First back: out of fullscreen, still on the lecture.
+    await tester.tap(find.byKey(const ValueKey('player-back-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(PlayerPage), findsOneWidget);
+    expect(find.text('More in this course'), findsOneWidget);
+
+    // Second back: out of the lecture.
+    await tester.tap(find.byKey(const ValueKey('player-back-button')));
+    await tester.pumpAndSettle();
+    expect(find.byType(PlayerPage), findsNothing);
+  });
+
+  testWidgets('the system back gesture also leaves fullscreen first', (
+    WidgetTester tester,
+  ) async {
+    final _WorkingVideoPlatform video = _WorkingVideoPlatform();
+    VideoPlayerPlatform.instance = video;
+
+    /// What Android's back button sends the engine.
+    Future<void> systemBack() => tester.binding.defaultBinaryMessenger
+        .handlePlatformMessage(
+          'flutter/navigation',
+          const JSONMethodCodec().encodeMethodCall(
+            const MethodCall('popRoute'),
+          ),
+          (_) {},
+        );
+
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    video.completeInitialization();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.byKey(const ValueKey('fullscreen-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('More in this course'), findsNothing);
+
+    // First back: out of fullscreen, still on the lecture.
+    await systemBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(PlayerPage), findsOneWidget);
+    expect(find.text('More in this course'), findsOneWidget);
+
+    // Second back: out of the lecture.
+    await systemBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(PlayerPage), findsNothing);
+  });
+
+  testWidgets('the remembered camera angle is used for the next lecture', (
+    WidgetTester tester,
+  ) async {
+    // As if the user had picked Slides on some earlier lecture.
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'tumlive.lecture_source': 'presentation',
+    });
     VideoPlayerPlatform.instance = _FailingVideoPlatform();
 
     await pumpApp(tester, fakeTumLive());
@@ -344,10 +481,120 @@ void main() {
     await tester.tap(find.textContaining('21.10.2025'));
     await tester.pumpAndSettle();
 
-    // Turning the phone sideways means "make the video bigger", so the lecture
-    // list gets out of the way entirely.
+    // The player is keyed by lecture and angle, so the key says which angle
+    // the page actually opened on without reaching into private state.
+    final LecturePlayer player = tester.widget<LecturePlayer>(
+      find.byType(LecturePlayer),
+    );
+    expect((player.key! as ValueKey<String>).value, endsWith('-presentation'));
+  });
+
+  testWidgets('the camera-angle menu offers every angle, fused included', (
+    WidgetTester tester,
+  ) async {
+    final _WorkingVideoPlatform video = _WorkingVideoPlatform();
+    VideoPlayerPlatform.instance = video;
+
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    video.completeInitialization();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // The switcher is a fullscreen-only control.
+    await tester.tap(find.byKey(const ValueKey('fullscreen-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.byTooltip('Camera angle'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // This fixture has all three tracks, so fused is composable and offered.
+    expect(find.text('Combined'), findsOneWidget);
+    expect(find.text('Slides'), findsOneWidget);
+    expect(find.text('Camera'), findsOneWidget);
+    expect(find.text('Fused (beta)'), findsOneWidget);
+
+    // And the menu sits above the icon rather than on top of it. Material
+    // anchors it to the button's top edge and, finding no room below in a bar
+    // at the foot of the video, slides it up over the control that opened it.
+    final Rect button = tester.getRect(find.byTooltip('Camera angle'));
+    final Rect lastItem = tester.getRect(find.text('Fused (beta)'));
+    expect(lastItem.bottom, lessThanOrEqualTo(button.top));
+
+    // ...and is centred on the icon rather than hanging off one side of it.
+    // Material would otherwise right-align it, because the icon sits nearer
+    // the right edge of the screen than the left.
+    final Rect menu = tester.getRect(
+      find
+          .ancestor(
+            of: find.text('Fused (beta)'),
+            matching: find.byType(Material),
+          )
+          .first,
+    );
+    expect(menu.center.dx, closeTo(button.center.dx, 1));
+  });
+
+  testWidgets('a landscape window alone does not hide the lecture list', (
+    WidgetTester tester,
+  ) async {
+    // 800x600 is landscape. It used to be enough to throw the page into
+    // fullscreen on its own, which meant a phone rotating on a desk did too.
+    VideoPlayerPlatform.instance = _FailingVideoPlatform();
+
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pumpAndSettle();
+
     expect(find.byType(LecturePlayer), findsOneWidget);
+    expect(find.text('More in this course'), findsOneWidget);
+  });
+
+  testWidgets('the fullscreen button is what hides the lecture list', (
+    WidgetTester tester,
+  ) async {
+    final _WorkingVideoPlatform video = _WorkingVideoPlatform();
+    VideoPlayerPlatform.instance = video;
+
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    // Not pumpAndSettle: this platform loads successfully, so the player sits
+    // on a spinner until the video reports in — and a spinner never settles.
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    // The chrome only exists once the video is up, and so does the button.
+    // Explicit pumps, not pumpAndSettle: a playing video polls its position
+    // every 500ms, so there is always another frame coming and nothing ever
+    // settles.
+    video.completeInitialization();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('More in this course'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('fullscreen-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('More in this course'), findsNothing);
+    // Still the same controller: the layout change must not restart the video.
+    expect(video.createCount, 1);
+
+    // And back again.
+    await tester.tap(find.byKey(const ValueKey('fullscreen-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('More in this course'), findsOneWidget);
+    expect(video.createCount, 1);
   });
 
   testWidgets('the home screen retry button reloads without throwing',
@@ -376,6 +623,69 @@ void main() {
 /// The smallest platform that satisfies video_player. Every create fails, which
 /// puts [LecturePlayer] straight into its error state — enough to prove the
 /// player mounted and got a URL, without reimplementing a video pipeline.
+/// A platform that comes up successfully, so the player draws its control bar
+/// and the fullscreen button can be pressed. The picture itself is a blank box.
+class _WorkingVideoPlatform extends VideoPlayerPlatform {
+  final StreamController<VideoEvent> _events =
+      StreamController<VideoEvent>.broadcast();
+
+  @override
+  Future<void> init() async {}
+
+  /// Counts controllers created, so a test can prove the video was not torn
+  /// down and rebuilt behind a layout change.
+  int createCount = 0;
+
+  @override
+  Future<int?> createWithOptions(VideoCreationOptions options) async {
+    createCount++;
+    return 1;
+  }
+
+  @override
+  Stream<VideoEvent> videoEventsFor(int playerId) => _events.stream;
+
+  @override
+  Future<void> dispose(int playerId) async => _events.close();
+
+  @override
+  Future<void> play(int playerId) async {}
+
+  @override
+  Future<void> pause(int playerId) async {}
+
+  @override
+  Future<void> setLooping(int playerId, bool looping) async {}
+
+  @override
+  Future<void> setVolume(int playerId, double volume) async {}
+
+  @override
+  Future<void> setPlaybackSpeed(int playerId, double speed) async {}
+
+  @override
+  Future<void> setMixWithOthers(bool mixWithOthers) async {}
+
+  @override
+  Future<void> seekTo(int playerId, Duration position) async {}
+
+  @override
+  Future<Duration> getPosition(int playerId) async => Duration.zero;
+
+  @override
+  Widget buildViewWithOptions(VideoViewOptions options) =>
+      const SizedBox.expand();
+
+  void completeInitialization() => _events.add(
+    VideoEvent(
+      eventType: VideoEventType.initialized,
+      duration: const Duration(minutes: 3),
+      size: const Size(1920, 1080),
+      rotationCorrection: 0,
+    ),
+  );
+}
+
 class _FailingVideoPlatform extends VideoPlayerPlatform {
   @override
   Future<void> init() async {}

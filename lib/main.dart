@@ -27,6 +27,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'src/api/tum_live_api.dart';
+import 'src/brand.dart';
 import 'src/app_scope.dart';
 import 'src/auth/auth_controller.dart';
 import 'src/auth/cookie_token_source.dart';
@@ -52,9 +53,6 @@ class TumLiveApp extends StatefulWidget {
 class _TumLiveAppState extends State<TumLiveApp> {
   late final AuthController _auth;
   late final TumLiveApi _api;
-
-  /// TUM's brand blue, the same one gocast reports for its login button.
-  static const Color _tumBlue = Color(0xFF3070B3);
 
   @override
   void initState() {
@@ -104,7 +102,7 @@ class _TumLiveAppState extends State<TumLiveApp> {
         title: 'TUMLive Player',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: _tumBlue),
+          colorScheme: ColorScheme.fromSeed(seedColor: tumBlue),
           cardTheme: const CardThemeData(
             elevation: 0,
             shape: RoundedRectangleBorder(
@@ -114,7 +112,7 @@ class _TumLiveAppState extends State<TumLiveApp> {
         ),
         darkTheme: ThemeData(
           colorScheme: ColorScheme.fromSeed(
-            seedColor: _tumBlue,
+            seedColor: tumBlue,
             brightness: Brightness.dark,
           ),
           cardTheme: const CardThemeData(
@@ -136,4 +134,3 @@ class _TumLiveAppState extends State<TumLiveApp> {
     );
   }
 }
-

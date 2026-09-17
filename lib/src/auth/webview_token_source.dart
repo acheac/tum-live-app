@@ -34,6 +34,15 @@
 /// behaviour: [mint] retries once through SSO before giving up. A server-side
 /// auth broker could not do this — renewal needs the IdP session, and that lives
 /// in a cookie jar on the user's device.
+///
+/// # Signing out
+///
+/// That same mechanism will happily undo a sign-out: drop gocast's cookie and
+/// the next request renews through `/saml/out`, because the IdP session is
+/// untouched and much longer-lived. So [clear] does two things beyond deleting
+/// the cookie — it wipes the whole jar, the identity provider's session
+/// included, and it blocks silent renewal until a token arrives on its own
+/// again, which only happens after the user returns through the login page.
 library;
 
 import 'dart:async';
@@ -53,6 +62,24 @@ class WebViewTokenSource implements TokenSource {
   Future<InAppWebViewController?>? _startup;
   Completer<void>? _pageLoad;
 
+  /// Set by [clear], cleared by the next token that comes back on its own.
+  ///
+  /// Silent renewal cannot tell "the session lapsed" from "the user signed out"
+  /// — both are a 401 — so without this, signing out would be undone by the very
+  /// next API call: `/saml/out` would hand back a fresh session, because TUM's
+  /// identity provider has its own much longer one. After an explicit sign-out
+  /// the user has to come back through the login page.
+  bool _silentRenewalBlocked = false;
+
+  /// Bumped by every [clear]. A [mint] that started before the sign-out belongs
+  /// to the session being thrown away, so whatever it comes back with is stale.
+  ///
+  /// Without this the block above is unenforceable: [bearerToken] gives up on a
+  /// slow mint after three seconds but lets it keep running, so a round trip
+  /// started before the sign-out can finish after it — and, finding a token,
+  /// clear the very flag that was meant to stop it.
+  int _generation = 0;
+
   /// How long to wait for any single navigation to settle. Kept short: this
   /// runs in the background now, but a stuck WebView should still give up
   /// rather than pin a request for half a minute.
@@ -71,15 +98,29 @@ class WebViewTokenSource implements TokenSource {
   /// login screen".
   @override
   Future<AccessToken?> mint() async {
+    final int generation = _generation;
     final InAppWebViewController? controller = await _controller();
     if (controller == null) return null;
 
     final AccessToken? first = await _requestToken(controller);
-    if (first != null) return first;
+    if (generation != _generation) return null;
+    if (first != null) {
+      // A session exists again — through the login page, or one that outlived a
+      // sign-out attempt. Either way, silent renewal is welcome from here on.
+      _silentRenewalBlocked = false;
+      return first;
+    }
+
+    // The user asked to be signed out. Renewing now would silently undo that.
+    if (_silentRenewalBlocked) return null;
 
     // No session, or a lapsed one. If the IdP still remembers this user, a trip
     // through SSO fixes it without a prompt.
     if (await _attemptSilentSso(controller)) {
+      // A sign-out during the round trip wins: it is the newer intent, and the
+      // session this would return was minted against an IdP the user has since
+      // asked us to forget.
+      if (generation != _generation) return null;
       return _requestToken(controller);
     }
     return null;
@@ -87,17 +128,28 @@ class WebViewTokenSource implements TokenSource {
 
   @override
   Future<void> clear() async {
+    _silentRenewalBlocked = true;
+    _generation++;
+
+    // Tear the WebView down *before* touching the jar, not after. A SAML round
+    // trip already in flight would otherwise land its `Set-Cookie` on the far
+    // side of the delete and hand back the session we just threw away —
+    // observed as a fresh `jwt` appearing about four seconds after sign-out.
+    // Disposing kills the navigation outright; the next mint boots a new view.
+    _headless?.dispose();
+    _headless = null;
+    _startup = null;
+    _pageLoad = null;
+
     try {
-      await CookieManager.instance().deleteCookies(url: WebUri(origin));
+      // Every cookie, not just tum.live's: the identity provider's session lives
+      // on its own domain and is what would otherwise sign the user straight
+      // back in. The jar belongs to this app alone, so there is nothing else in
+      // it to lose.
+      await CookieManager.instance().deleteAllCookies();
     } on Object {
       // Nothing to clean up, or the platform refused. Either way, signing out
       // locally is what matters and the caller has already done that.
-    }
-    // Drop back to a known page so the next mint starts from a clean document.
-    final InAppWebViewController? controller =
-        await _controller().timeout(_navigationTimeout, onTimeout: () => null);
-    if (controller != null) {
-      await _navigate(controller, origin);
     }
   }
 

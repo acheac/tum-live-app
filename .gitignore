@@ -56,3 +56,6 @@ devtools_options.yaml
 
 # Logs / temp
 tmp/
+
+# Claude generated readme file
+CLAUDE.md

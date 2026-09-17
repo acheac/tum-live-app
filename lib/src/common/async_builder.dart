@@ -21,6 +21,7 @@ class AsyncBuilder<T> extends StatelessWidget {
     required this.builder,
     this.onRetry,
     this.loading,
+    this.loadingBuilder,
   });
 
   final Future<T>? future;
@@ -28,13 +29,21 @@ class AsyncBuilder<T> extends StatelessWidget {
   final VoidCallback? onRetry;
   final Widget? loading;
 
+  /// Same as [loading], but built only while waiting.
+  ///
+  /// Use this when the placeholder is expensive to describe — the player page
+  /// reuses its whole loaded page as the placeholder so a lecture switch does
+  /// not blank the screen, and building that on every frame would be waste.
+  final Widget Function()? loadingBuilder;
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<T>(
       future: future,
       builder: (BuildContext context, AsyncSnapshot<T> snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return loading ??
+          return loadingBuilder?.call() ??
+              loading ??
               const Center(child: CircularProgressIndicator.adaptive());
         }
         if (snapshot.hasError) {

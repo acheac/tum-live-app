@@ -8,6 +8,8 @@
 /// job, one layer up.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
@@ -17,6 +19,7 @@ class LecturePlayer extends StatefulWidget {
   const LecturePlayer({
     super.key,
     required this.videoUrl,
+    this.overlayVideoUrl,
     required this.title,
     this.subtitle,
     this.extraControls = const <Widget>[],
@@ -24,10 +27,20 @@ class LecturePlayer extends StatefulWidget {
     this.startAt,
     this.onPositionChanged,
     this.onRetry,
+    this.isFullscreen = false,
+    this.onToggleFullscreen,
+    this.onPlayingChanged,
   });
 
   /// An HLS playlist URL, usually carrying a `?jwt=` that expires in ~7 hours.
   final String videoUrl;
+
+  /// A second stream to play over the first, bottom-right — the camera in
+  /// `LectureSource.fused`. Null for every ordinary source.
+  ///
+  /// It is a whole second decode, so this is opt-in rather than something the
+  /// player does whenever a camera track happens to exist.
+  final String? overlayVideoUrl;
 
   final String title;
   final String? subtitle;
@@ -42,6 +55,16 @@ class LecturePlayer extends StatefulWidget {
   final Duration? startAt;
 
   final void Function(Duration position, Duration duration)? onPositionChanged;
+
+  /// Fired when playback starts or stops. See [PlayerChrome.onPlayingChanged].
+  final ValueChanged<bool>? onPlayingChanged;
+
+  /// Whether the picture has the whole screen. Passed straight to
+  /// [PlayerChrome], which uses it to decide how much belongs in the bar.
+  final bool isFullscreen;
+
+  /// Enters or leaves fullscreen. Null hides the button.
+  final VoidCallback? onToggleFullscreen;
 
   /// What the Retry button should do.
   ///
@@ -58,6 +81,20 @@ class _LecturePlayerState extends State<LecturePlayer> {
   late VideoPlayerController _controller;
   bool _isError = false;
 
+  /// The camera track drawn over the picture, when the fused source is on.
+  VideoPlayerController? _overlay;
+  bool _overlayReady = false;
+  Timer? _syncTimer;
+
+  /// How often to check the two streams against each other. They are separate
+  /// decoders with separate clocks, so they drift; nothing keeps them together
+  /// except this.
+  static const Duration _syncInterval = Duration(seconds: 2);
+
+  /// How far apart they may drift before the camera is nudged back. Below
+  /// roughly this, a re-seek is more distracting than the drift.
+  static const Duration _maxDrift = Duration(milliseconds: 400);
+
   /// Set once we have seeked to [LecturePlayer.startAt], so a later rebuild
   /// cannot yank the user back to where they started.
   bool _resumed = false;
@@ -66,6 +103,7 @@ class _LecturePlayerState extends State<LecturePlayer> {
   void initState() {
     super.initState();
     _load();
+    _loadOverlay();
   }
 
   @override
@@ -81,12 +119,99 @@ class _LecturePlayerState extends State<LecturePlayer> {
       });
       if (!_isError) old.dispose();
     }
+    if (oldWidget.overlayVideoUrl != widget.overlayVideoUrl) {
+      _disposeOverlay();
+      _loadOverlay();
+    }
+  }
+
+  /// Boots the camera track and starts keeping it in step with the picture.
+  void _loadOverlay() {
+    final String? url = widget.overlayVideoUrl;
+    if (url == null) return;
+    final VideoPlayerController overlay = VideoPlayerController.networkUrl(
+      Uri.parse(url),
+      // Without this the two streams stall each other dead. Both players ask
+      // the platform for exclusive audio focus, so each one starting takes it
+      // from the other, and media3 pauses on a permanent focus loss — on a real
+      // device both decoders sat at inputFps=0 while the log filled with
+      // onAudioFocusChange(-1). Muting is not the same as declining focus:
+      // mixWithOthers is what stops the request being made at all. The main
+      // stream keeps focus, so other apps still yield to a lecture.
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+    );
+    _overlay = overlay;
+    overlay
+        .initialize()
+        .then((_) {
+          if (!mounted || _overlay != overlay) return;
+          // One soundtrack between them, and it belongs to the main stream.
+          overlay.setVolume(0);
+          setState(() => _overlayReady = true);
+          _controller.addListener(_followMain);
+          _syncTimer = Timer.periodic(
+            _syncInterval,
+            (_) => unawaited(_correctDrift()),
+          );
+          unawaited(_correctDrift(force: true));
+        })
+        .catchError((Object error) {
+          // The camera is a bonus layer. Losing it leaves the lecture playing.
+          debugPrint('Fused overlay failed to load: $error');
+          if (!mounted) return;
+          setState(() => _overlayReady = false);
+        });
+  }
+
+  void _disposeOverlay() {
+    _syncTimer?.cancel();
+    _syncTimer = null;
+    _controller.removeListener(_followMain);
+    _overlay?.dispose();
+    _overlay = null;
+    _overlayReady = false;
+  }
+
+  /// Play, pause and speed, matched the moment the main stream changes.
+  ///
+  /// Position is deliberately not handled here — this runs on every frame the
+  /// main controller reports, and seeking that often would stutter both. Drift
+  /// is [_correctDrift]'s job, on a timer.
+  void _followMain() {
+    final VideoPlayerController? overlay = _overlay;
+    if (overlay == null || !_overlayReady) return;
+    final VideoPlayerValue main = _controller.value;
+    if (!main.isInitialized) return;
+    if (main.isPlaying != overlay.value.isPlaying) {
+      main.isPlaying ? overlay.play() : overlay.pause();
+    }
+    if (main.playbackSpeed != overlay.value.playbackSpeed) {
+      unawaited(overlay.setPlaybackSpeed(main.playbackSpeed));
+    }
+  }
+
+  Future<void> _correctDrift({bool force = false}) async {
+    final VideoPlayerController? overlay = _overlay;
+    if (overlay == null || !_overlayReady || !mounted) return;
+    final VideoPlayerValue main = _controller.value;
+    if (!main.isInitialized) return;
+    final Duration drift = main.position - overlay.value.position;
+    if (!force && drift.abs() <= _maxDrift) return;
+    await overlay.seekTo(main.position);
   }
 
   /// Creates a fresh controller and starts loading the stream.
   void _load() {
     _isError = false;
-    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.videoUrl));
+    _controller = VideoPlayerController.networkUrl(
+      Uri.parse(widget.videoUrl),
+      // Stated rather than left to the default, because the platform reads this
+      // as one global flag at creation time, not per player: whatever the last
+      // controller asked for is what the next one gets. The overlay sets it to
+      // true, so without this a later reload of the main stream would silently
+      // inherit that and stop taking audio focus from other apps.
+      videoPlayerOptions: VideoPlayerOptions(),
+    );
     _controller
         .initialize()
         .then((_) {
@@ -114,7 +239,8 @@ class _LecturePlayerState extends State<LecturePlayer> {
     final Duration duration = _controller.value.duration;
     // Never resume within the last 30 seconds: the user finished it, and
     // dropping them at the credits is worse than starting over.
-    if (duration > Duration.zero && start >= duration - const Duration(seconds: 30)) {
+    if (duration > Duration.zero &&
+        start >= duration - const Duration(seconds: 30)) {
       _resumed = true;
       return;
     }
@@ -137,6 +263,7 @@ class _LecturePlayerState extends State<LecturePlayer> {
 
   @override
   void dispose() {
+    _disposeOverlay();
     _controller.dispose();
     super.dispose();
   }
@@ -215,10 +342,19 @@ class _LecturePlayerState extends State<LecturePlayer> {
     }
     return PlayerChrome(
       controller: _controller,
+      overlay: _overlayReady && _overlay != null
+          ? VideoPlayer(_overlay!)
+          : null,
+      // The chrome sizes and positions the inset, so it needs the shape; the
+      // child no longer decides it.
+      overlayAspectRatio: _overlay?.value.aspectRatio ?? 16 / 9,
       onPositionChanged: widget.onPositionChanged,
       extraControls: widget.extraControls,
       title: widget.title,
       onBack: widget.onBack,
+      isFullscreen: widget.isFullscreen,
+      onToggleFullscreen: widget.onToggleFullscreen,
+      onPlayingChanged: widget.onPlayingChanged,
     );
   }
 }

@@ -8,6 +8,8 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:tumlive_player/src/player/player_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:tumlive_player/src/api/api_exception.dart';
@@ -161,6 +163,63 @@ void main() {
         lecture.availableSources.keys,
         <LectureSource>[LectureSource.combined, LectureSource.camera],
       );
+    });
+
+    test('fused needs both the slides and the camera', () {
+      Lecture withUrls(String pres, String cam) => Lecture.fromJson(
+        <String, dynamic>{
+          'id': 1,
+          'playlistUrl': 'comb',
+          'playlistUrlPres': pres,
+          'playlistUrlCam': cam,
+        },
+      );
+
+      // One layer alone composites into nothing.
+      expect(
+        withUrls('pres', '').availableSources.keys,
+        isNot(contains(LectureSource.fused)),
+      );
+      expect(
+        withUrls('', 'cam').availableSources.keys,
+        isNot(contains(LectureSource.fused)),
+      );
+
+      final Lecture both = withUrls('pres', 'cam');
+      expect(both.availableSources.keys, contains(LectureSource.fused));
+      // Fused plays the slides; the camera goes over the top separately.
+      expect(both.availableSources[LectureSource.fused], 'pres');
+      expect(both.fusedOverlayUrl, 'cam');
+    });
+  });
+
+  group('remembered camera angle', () {
+    setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+    test('nothing stored means no opinion', () async {
+      expect(await const SourcePreference().read(), isNull);
+    });
+
+    test('a written angle comes back', () async {
+      const SourcePreference prefs = SourcePreference();
+      await prefs.write(LectureSource.fused);
+      expect(await prefs.read(), LectureSource.fused);
+    });
+
+    test('an unknown stored name is ignored rather than crashing', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'tumlive.lecture_source': 'holograph',
+      });
+      expect(await const SourcePreference().read(), isNull);
+    });
+
+    test('angles are stored by name, not by index', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'tumlive.lecture_source': 'presentation',
+      });
+      // Storing the index would have broken the moment `fused` was added to
+      // the enum, silently switching everyone to a different angle.
+      expect(await const SourcePreference().read(), LectureSource.presentation);
     });
   });
 

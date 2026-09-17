@@ -10,6 +10,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
@@ -111,7 +112,9 @@ class _FakeVideoPlayerPlatform extends VideoPlayerPlatform {
   Future<void> setPlaybackSpeed(int playerId, double speed) async {}
 
   @override
-  Future<void> setMixWithOthers(bool mixWithOthers) async {}
+  Future<void> setMixWithOthers(bool mixWithOthers) async {
+    calls.add('mixWithOthers:$mixWithOthers');
+  }
 
   /// When set, seekTo parks until the test completes it. Lets a test observe
   /// the UI while a seek is still in flight.
@@ -184,10 +187,16 @@ void main() {
   /// URL and knows nothing about the API, so these tests need no fake HTTP
   /// client. Resolving a lecture id into a URL is PlayerPage's job and is
   /// tested separately.
-  Future<void> pumpApp(WidgetTester tester) async {
+  Future<void> pumpApp(
+    WidgetTester tester, {
+    bool isFullscreen = false,
+    List<Widget> extraControls = const <Widget>[],
+    VoidCallback? onToggleFullscreen,
+    String? overlayVideoUrl,
+  }) async {
     VideoPlayerPlatform.instance = fake;
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
         debugShowCheckedModeBanner: false,
         // LecturePlayer is only the picture now: no Scaffold, no AppBar, so it
         // can sit in a 16:9 slot with a lecture list underneath. Material
@@ -196,7 +205,11 @@ void main() {
         home: Scaffold(
           body: LecturePlayer(
             videoUrl: 'https://example.invalid/playlist.m3u8',
+            overlayVideoUrl: overlayVideoUrl,
             title: 'TUMLive Player',
+            isFullscreen: isFullscreen,
+            extraControls: extraControls,
+            onToggleFullscreen: onToggleFullscreen,
           ),
         ),
       ),
@@ -254,7 +267,7 @@ void main() {
       fake.completeInitialization();
       await tester.pumpAndSettle();
 
-      expect(find.text('00:00 / 03:05'), findsOneWidget);
+      expect(find.text('00:00/03:05'), findsOneWidget);
     });
 
     testWidgets('durations past an hour render as h:mm:ss', (WidgetTester tester) async {
@@ -265,7 +278,7 @@ void main() {
       fake.completeInitialization();
       await tester.pumpAndSettle();
 
-      expect(find.text('00:00 / 1:32:07'), findsOneWidget);
+      expect(find.text('00:00/1:32:07'), findsOneWidget);
     });
 
     testWidgets('autoplays once initialized and shows the pause icon', (WidgetTester tester) async {
@@ -397,6 +410,652 @@ void main() {
     });
   });
 
+  group('gestures over the picture', () {
+    setUp(() => fake = _FakeVideoPlayerPlatform());
+
+    /// The picture's centre, which is clear of both control bars.
+    Offset pictureCentre(WidgetTester tester) =>
+        tester.getRect(find.byKey(const ValueKey('player-surface'))).center;
+
+    testWidgets('a single tap hides the controls rather than pausing', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+      expect(controlBarOpacity(tester), 1);
+
+      fake.calls.clear();
+      await tester.tapAt(pictureCentre(tester));
+
+      // Inside the 250ms window the bar has not moved: a second tap could
+      // still arrive, and a double tap must never make it flicker.
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(controlBarOpacity(tester), 1);
+
+      // Window closed, fade done.
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(controlBarOpacity(tester), 0);
+      expect(fake.calls, isNot(contains('pause')));
+    });
+
+    testWidgets('a double tap pauses without waking the controls',
+        (WidgetTester tester) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+      // Let the bar put itself away first.
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(controlBarOpacity(tester), 0);
+
+      fake.calls.clear();
+      final Offset centre = pictureCentre(tester);
+      await tester.tapAt(centre);
+      await tester.pump(const Duration(milliseconds: 50));
+      // Mid-pair: the first tap on its own has changed nothing, so there is no
+      // flash of the bar to pull back.
+      expect(controlBarOpacity(tester), 0);
+
+      await tester.tapAt(centre);
+      await tester.pumpAndSettle();
+
+      expect(fake.calls, contains('pause'));
+      expect(controlBarOpacity(tester), 0);
+    });
+
+    testWidgets('a double tap leaves a visible bar visible',
+        (WidgetTester tester) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+      expect(controlBarOpacity(tester), 1);
+
+      fake.calls.clear();
+      final Offset centre = pictureCentre(tester);
+      await tester.tapAt(centre);
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tapAt(centre);
+      await tester.pumpAndSettle();
+
+      expect(fake.calls, contains('pause'));
+      expect(controlBarOpacity(tester), 1);
+    });
+
+    testWidgets('a horizontal drag scrubs, then seeks on release', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      fake.calls.clear();
+      final TestGesture drag = await tester.startGesture(pictureCentre(tester));
+      // In steps, with time passing: a single teleporting move does not look
+      // like a drag to the recognizer.
+      for (int i = 0; i < 4; i++) {
+        await drag.moveBy(const Offset(40, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      // Mid-drag: readout up, bar up so the handle shows the distance
+      // travelled, playback held still.
+      expect(find.byKey(const ValueKey('scrub-indicator')), findsOneWidget);
+      expect(controlBarOpacity(tester), 1);
+      expect(fake.calls, contains('pause'));
+      expect(fake.calls, isNot(contains('seekTo')));
+
+      // A slow swipe outlasts the 3s auto-hide, which must not fire while the
+      // finger is still down — the handle is the whole point of the bar here.
+      await tester.pump(const Duration(seconds: 4));
+      expect(controlBarOpacity(tester), 1);
+
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect(fake.calls, contains('seekTo'));
+      expect(fake.seekedTo, greaterThan(Duration.zero));
+      expect(find.byKey(const ValueKey('scrub-indicator')), findsNothing);
+      // Dragging right moves forward, and 160px is well short of the whole
+      // 3m05s video.
+      expect(fake.seekedTo, lessThan(const Duration(minutes: 3, seconds: 5)));
+    });
+
+    testWidgets('dragging left of the start clamps at zero', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final TestGesture drag = await tester.startGesture(pictureCentre(tester));
+      for (int i = 0; i < 6; i++) {
+        await drag.moveBy(const Offset(-60, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(find.byKey(const ValueKey('scrub-indicator')), findsOneWidget);
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect(fake.seekedTo, Duration.zero);
+    });
+
+    testWidgets('a tap that never travels does not disturb playback', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      fake.calls.clear();
+      // A press and release with no movement can still be handed to the drag
+      // recognizer. It must not pause, seek, or show the readout.
+      final TestGesture drag = await tester.startGesture(pictureCentre(tester));
+      await drag.up();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+
+      expect(fake.calls, isNot(contains('seekTo')));
+      expect(find.byKey(const ValueKey('scrub-indicator')), findsNothing);
+    });
+  });
+
+  group('the bar is compact', () {
+    setUp(() => fake = _FakeVideoPlayerPlatform());
+
+    testWidgets('the bottom bar stays a thin strip', (WidgetTester tester) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      // 54dp: a 14 gradient runway over a single 40dp row. Bilibili's bar is
+      // a strip over the picture, not a toolbar under it, and on a 16:9 phone
+      // slot every dp it takes is a dp of video it covers. Stacking the track
+      // on its own line above the row is what this number guards against.
+      expect(
+        tester.getSize(find.byKey(const ValueKey('control-bar'))).height,
+        lessThanOrEqualTo(58),
+      );
+    });
+
+    testWidgets('the track shares the row rather than taking its own', (WidgetTester tester) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final Rect seek = tester.getRect(find.byKey(const ValueKey('seek-bar')));
+      final Rect play = tester.getRect(
+        find.byKey(const ValueKey('play-pause-button')),
+      );
+      // Same line as the play button, and starting to its right.
+      expect(seek.center.dy, closeTo(play.center.dy, 1));
+      expect(seek.left, greaterThan(play.right - 1));
+    });
+
+    testWidgets('the play button does not claim a 48dp tap target', (WidgetTester tester) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      // This alone used to set the bar's height: IconButton takes its tap
+      // target from the theme, so it ignores `constraints` and visualDensity.
+      expect(
+        tester.getSize(find.byKey(const ValueKey('play-pause-button'))).height,
+        lessThanOrEqualTo(36),
+      );
+    });
+  });
+
+  group('what the bar carries', () {
+    setUp(() => fake = _FakeVideoPlayerPlatform());
+
+    const Widget angle = Icon(
+      Icons.switch_video_outlined,
+      key: ValueKey<String>('angle-switcher'),
+    );
+
+    testWidgets('the 16:9 bar carries nothing but the way into fullscreen', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        extraControls: <Widget>[angle],
+        onToggleFullscreen: () {},
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('fullscreen-button')), findsOneWidget);
+      // Settings, not controls: they would crowd a 560dp-wide bar sitting on
+      // top of the video.
+      expect(find.byKey(const ValueKey('speed-menu')), findsNothing);
+      expect(find.byKey(const ValueKey('angle-switcher')), findsNothing);
+    });
+
+    testWidgets('fullscreen is where speed and camera angle live', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        isFullscreen: true,
+        extraControls: <Widget>[angle],
+        onToggleFullscreen: () {},
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('speed-menu')), findsOneWidget);
+      expect(find.byKey(const ValueKey('angle-switcher')), findsOneWidget);
+      expect(find.byKey(const ValueKey('fullscreen-button')), findsOneWidget);
+    });
+
+    testWidgets('the 16:9 slot has no fill-screen control', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester, onToggleFullscreen: () {});
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      // Nothing to reclaim in a 16:9 box, and the bar has no room for it.
+      expect(find.byKey(const ValueKey('fill-screen-button')), findsNothing);
+    });
+
+    testWidgets('fullscreen offers fill-screen', (WidgetTester tester) async {
+      await pumpApp(tester, isFullscreen: true, onToggleFullscreen: () {});
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('fill-screen-button')), findsOneWidget);
+    });
+
+    testWidgets('filling crops from the bottom, not the middle', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester, isFullscreen: true, onToggleFullscreen: () {});
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      // Letterboxed to begin with: the whole frame, nothing cropped.
+      expect(find.byType(FittedBox), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('fill-screen-button')));
+      await tester.pumpAndSettle();
+
+      final FittedBox fitted = tester.widget<FittedBox>(
+        find
+            .ancestor(
+              of: find.byType(VideoPlayer),
+              matching: find.byType(FittedBox),
+            )
+            .first,
+      );
+      expect(fitted.fit, BoxFit.cover);
+      // Top-anchored on purpose: TUM's combined stream keeps its slides and
+      // camera in the top of the frame and pads the bottom with black, so a
+      // centred crop would cut the content and leave the padding.
+      expect(fitted.alignment, Alignment.topCenter);
+    });
+
+    testWidgets('the fullscreen button reports the tap', (
+      WidgetTester tester,
+    ) async {
+      int taps = 0;
+      await pumpApp(tester, onToggleFullscreen: () => taps++);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('fullscreen-button')));
+      await tester.pumpAndSettle();
+      expect(taps, 1);
+    });
+
+    testWidgets('no callback, no button', (WidgetTester tester) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('fullscreen-button')), findsNothing);
+    });
+  });
+
+  group('fused source', () {
+    setUp(() {
+      fake = _FakeVideoPlayerPlatform();
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+    });
+
+    testWidgets('no overlay url, no second picture', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(tester);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      expect(find.byType(VideoPlayer), findsOneWidget);
+    });
+
+    testWidgets('the camera is inset over the bottom-right of the slides', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      // Both streams on screen: slides underneath, camera over them.
+      expect(find.byType(VideoPlayer), findsNWidgets(2));
+
+      final Rect player = tester.getRect(
+        find.byKey(const ValueKey('player-surface')),
+      );
+      // The slides picture, which on this 800x600 surface is a 16:9 band with
+      // letterboxing above and below.
+      final Rect slides = tester.getRect(find.byType(VideoPlayer).first);
+      final Rect inset = tester.getRect(find.byType(VideoPlayer).last);
+
+      expect(inset.left, greaterThan(player.center.dx));
+      expect(inset.top, greaterThan(player.center.dy));
+      // Tucked into the slides' own corner, not the player's — the player's
+      // right edge is letterbox black on a wide screen.
+      expect(inset.right, lessThanOrEqualTo(slides.right));
+      expect(inset.right, greaterThan(slides.right - 24));
+      expect(inset.bottom, lessThanOrEqualTo(slides.bottom));
+      // And small: a glance at the lecturer, not a second thing to watch.
+      expect(inset.width, lessThan(slides.width / 4));
+    });
+
+    testWidgets('pausing the slides pauses the camera with them', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      fake.calls.clear();
+      await tester.tap(find.byKey(const ValueKey('play-pause-button')));
+      await tester.pumpAndSettle();
+
+      // Both decoders, not just the one the button owns — two streams that
+      // disagree about whether they are running is the whole risk here.
+      expect(fake.calls.where((String c) => c == 'pause').length, 2);
+    });
+
+    testWidgets('the inset is smaller in a 16:9 slot than in fullscreen', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+      final double windowed = tester
+          .getRect(find.byType(VideoPlayer).last)
+          .width;
+
+      await pumpApp(
+        tester,
+        isFullscreen: true,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      await tester.pumpAndSettle();
+      final double full = tester.getRect(find.byType(VideoPlayer).last).width;
+
+      // A 16:9 box on a phone has far less room to give away than a whole
+      // screen does.
+      expect(windowed, lessThan(full));
+    });
+
+    testWidgets('the inset can be dragged around the slides', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final Rect before = tester.getRect(find.byType(VideoPlayer).last);
+      // From the middle of the inset: the corners resize, the middle moves.
+      await tester.dragFrom(before.center, const Offset(-120, -60));
+      await tester.pumpAndSettle();
+
+      final Rect after = tester.getRect(find.byType(VideoPlayer).last);
+      expect(after.left, closeTo(before.left - 120, 1));
+      expect(after.top, closeTo(before.top - 60, 1));
+      expect(after.size, before.size);
+    });
+
+    testWidgets('a drag cannot push the inset off the slides', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final Rect slides = tester.getRect(find.byType(VideoPlayer).first);
+      await tester.dragFrom(
+        tester.getRect(find.byType(VideoPlayer).last).center,
+        const Offset(4000, 4000),
+      );
+      await tester.pumpAndSettle();
+
+      final Rect after = tester.getRect(find.byType(VideoPlayer).last);
+      expect(after.right, lessThanOrEqualTo(slides.right + 1));
+      expect(after.bottom, lessThanOrEqualTo(slides.bottom + 1));
+    });
+
+    testWidgets('any corner resizes, pinning the one opposite', (
+      WidgetTester tester,
+    ) async {
+      // A small inset parked away from the edges, so a resize in any direction
+      // has room to actually happen.
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'tumlive.inset_right': 0.35,
+        'tumlive.inset_bottom': 0.35,
+        'tumlive.inset_width': 0.15,
+      });
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      Rect inset() => tester.getRect(find.byType(VideoPlayer).last);
+
+      // Each corner, dragged diagonally outwards.
+      for (final (String name, bool left, bool top) in <(String, bool, bool)>[
+        ('topLeft', true, true),
+        ('topRight', false, true),
+        ('bottomLeft', true, false),
+        ('bottomRight', false, false),
+      ]) {
+        final Rect before = inset();
+        // Six pixels inside the corner, which is within the grab zone.
+        final Offset grab = Offset(
+          left ? before.left + 6 : before.right - 6,
+          top ? before.top + 6 : before.bottom - 6,
+        );
+        final Offset outwards = Offset(left ? -40 : 40, top ? -20 : 20);
+
+        await tester.dragFrom(grab, outwards);
+        await tester.pumpAndSettle();
+        final Rect after = inset();
+
+        expect(after.width, greaterThan(before.width), reason: '$name grows');
+        // The pinned corner is the one diagonally opposite.
+        expect(
+          left ? after.right : after.left,
+          closeTo(left ? before.right : before.left, 1),
+          reason: '$name pins the far side',
+        );
+        expect(
+          top ? after.bottom : after.top,
+          closeTo(top ? before.bottom : before.top, 1),
+          reason: '$name pins the far edge',
+        );
+
+        // Shrink it back so every corner starts from the same size.
+        await tester.dragFrom(
+          Offset(
+            left ? after.left + 6 : after.right - 6,
+            top ? after.top + 6 : after.bottom - 6,
+          ),
+          -outwards,
+        );
+        await tester.pumpAndSettle();
+      }
+    });
+
+    testWidgets('a corner can be grabbed from just outside the picture', (
+      WidgetTester tester,
+    ) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'tumlive.inset_right': 0.35,
+        'tumlive.inset_bottom': 0.35,
+        'tumlive.inset_width': 0.15,
+      });
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final Rect before = tester.getRect(find.byType(VideoPlayer).last);
+      // Outside the video the user can see, inside the region they can grab.
+      // A thumb aiming at a 120x68 window's corner does not land on the pixel.
+      await tester.dragFrom(
+        before.topLeft - const Offset(6, 6),
+        const Offset(-40, -20),
+      );
+      await tester.pumpAndSettle();
+
+      final Rect after = tester.getRect(find.byType(VideoPlayer).last);
+      expect(after.width, greaterThan(before.width));
+      expect(after.right, closeTo(before.right, 1));
+    });
+
+    testWidgets('nothing is drawn on the inset to advertise resizing', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      // The grab zones are real but invisible: a badge on the lecturer's face
+      // for the whole lecture is a poor way to say "this corner is draggable".
+      // The grab zones are real but invisible: a badge on the lecturer's face
+      // for the whole lecture is a poor way to say "this corner is draggable".
+      expect(find.byIcon(Icons.open_in_full_rounded), findsNothing);
+      expect(find.byKey(const ValueKey<String>('camera-inset')), findsOneWidget);
+    });
+
+    testWidgets('a moved inset comes back where it was left', (
+      WidgetTester tester,
+    ) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'tumlive.inset_right': 0.5,
+        'tumlive.inset_bottom': 0.4,
+        'tumlive.inset_width': 0.3,
+      });
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final Rect slides = tester.getRect(find.byType(VideoPlayer).first);
+      final Rect inset = tester.getRect(find.byType(VideoPlayer).last);
+      expect(inset.width, closeTo(slides.width * 0.3, 1));
+      expect(slides.right - inset.right, closeTo(slides.width * 0.5, 1));
+      expect(slides.bottom - inset.bottom, closeTo(slides.height * 0.4, 1));
+    });
+
+    testWidgets('a stored position too big for this screen is pulled back in', (
+      WidgetTester tester,
+    ) async {
+      // Dragged to a corner of some larger screen, then opened on a smaller
+      // one. An inset parked outside the picture could never be dragged back.
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'tumlive.inset_right': 0.95,
+        'tumlive.inset_bottom': 0.95,
+        'tumlive.inset_width': 0.9,
+      });
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final Rect slides = tester.getRect(find.byType(VideoPlayer).first);
+      final Rect inset = tester.getRect(find.byType(VideoPlayer).last);
+      expect(inset.left, greaterThanOrEqualTo(slides.left - 1));
+      expect(inset.top, greaterThanOrEqualTo(slides.top - 1));
+      expect(inset.width, lessThanOrEqualTo(slides.width / 2 + 1));
+    });
+
+    testWidgets('the camera declines audio focus, the slides keep it', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      // Order matters: the platform reads this as one global flag when a
+      // player is created. The slides are created first and take focus; the
+      // camera is created second and declines it. Both asking for exclusive
+      // focus is what made the two streams pause each other dead on a device.
+      final List<String> focus = fake.calls
+          .where((String c) => c.startsWith('mixWithOthers:'))
+          .toList();
+      expect(focus, <String>['mixWithOthers:false', 'mixWithOthers:true']);
+    });
+
+    testWidgets('the inset clears the control bar and never moves', (
+      WidgetTester tester,
+    ) async {
+      await pumpApp(
+        tester,
+        overlayVideoUrl: 'https://example.invalid/cam.m3u8',
+      );
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      // Clear of the bar while the bar is up...
+      expect(controlBarOpacity(tester), 1);
+      final Rect bar = tester.getRect(find.byKey(const ValueKey('control-bar')));
+      final Rect raised = tester.getRect(find.byType(VideoPlayer).last);
+      expect(raised.bottom, lessThanOrEqualTo(bar.top + 1));
+
+      // ...and in exactly the same place once it goes away. The inset is meant
+      // to sit in the background; shifting it whenever the bar is summoned
+      // pulled the eye straight to it.
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(controlBarOpacity(tester), 0);
+      expect(tester.getRect(find.byType(VideoPlayer).last), raised);
+    });
+  });
+
   group('seek handle', () {
     setUp(() => fake = _FakeVideoPlayerPlatform());
 
@@ -431,7 +1090,7 @@ void main() {
       await pumpApp(tester);
       fake.completeInitialization();
       await tester.pumpAndSettle();
-      expect(find.text('00:00 / 03:05'), findsOneWidget);
+      expect(find.text('00:00/03:05'), findsOneWidget);
 
       final Rect rect = tester.getRect(find.byKey(const ValueKey('seek-bar')));
       final TestGesture drag =
@@ -441,8 +1100,8 @@ void main() {
       await tester.pumpAndSettle();
 
       // Still 03:05 total, but the left half now shows the drag target.
-      expect(find.text('00:00 / 03:05'), findsNothing);
-      expect(find.textContaining('/ 03:05'), findsOneWidget);
+      expect(find.text('00:00/03:05'), findsNothing);
+      expect(find.textContaining('/03:05'), findsOneWidget);
 
       await drag.up();
       await tester.pumpAndSettle();
