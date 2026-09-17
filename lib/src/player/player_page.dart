@@ -27,6 +27,8 @@ import '../app_scope.dart';
 import '../auth/auth_controller.dart';
 import '../common/async_builder.dart';
 import '../common/formatting.dart';
+import '../common/orientation.dart';
+import '../common/pin_button.dart';
 import 'lecture_player.dart';
 import 'player_controls.dart';
 import 'player_preferences.dart';
@@ -130,13 +132,12 @@ class _PlayerPageState extends State<PlayerPage> {
   TumLiveApi? _api;
   AuthController? _auth;
 
+  /// The orientations this screen size allows, cached for the same reason.
+  List<DeviceOrientation>? _allowed;
+
   @override
   void initState() {
     super.initState();
-    // Pin to portrait for as long as this page is up. Without this the
-    // platform is free to rotate us, and auto-rotation is exactly what the
-    // fullscreen button exists to replace.
-    unawaited(_lockPortrait());
   }
 
   // The first load happens here, not in initState: reading an InheritedWidget
@@ -146,6 +147,13 @@ class _PlayerPageState extends State<PlayerPage> {
     super.didChangeDependencies();
     _api = AppScope.apiOf(context);
     _auth = AppScope.authOf(context);
+    _allowed = allowedOrientations(MediaQuery.of(context));
+    // Rotation is the screen's decision, not this page's — on a phone that is
+    // portrait, which is what the fullscreen button exists to replace. Skipped
+    // while fullscreen: that state pins landscape on purpose, and the window
+    // resizing as the system bars hide would otherwise stand the video back up
+    // mid-lecture.
+    if (!_forcedFullscreen) unawaited(_applyPolicy());
     _future ??= _load();
   }
 
@@ -155,26 +163,40 @@ class _PlayerPageState extends State<PlayerPage> {
     // got to. Fire-and-forget: the page is going away either way.
     unawaited(_reportProgress(lectureId: _lectureId, force: true));
     // Never leave the rest of the app locked sideways, whatever state the
-    // player was in when it was closed.
-    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
+    // player was in when it was closed. Back to what the screen allows rather
+    // than to every orientation: on a phone the answer is portrait, and
+    // handing back DeviceOrientation.values here would switch rotation on for
+    // the course list the user is returning to.
+    unawaited(
+      SystemChrome.setPreferredOrientations(
+        _allowed ?? DeviceOrientation.values,
+      ),
+    );
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     super.dispose();
   }
 
-  Future<void> _lockPortrait() => SystemChrome.setPreferredOrientations(
-    <DeviceOrientation>[DeviceOrientation.portraitUp],
+  /// Hands orientation back to [allowedOrientations] for this screen.
+  Future<void> _applyPolicy() => SystemChrome.setPreferredOrientations(
+    _allowed ?? const <DeviceOrientation>[DeviceOrientation.portraitUp],
   );
 
   /// Enters or leaves fullscreen by turning the phone.
   ///
-  /// Because the orientation is pinned both ways, there is no race to manage
-  /// on the way out: the platform cannot put us back into landscape behind our
-  /// back, so the flag and the screen stay in step.
+  /// On a phone the orientation is pinned both ways — portrait outside
+  /// fullscreen, landscape inside — so there is no race on the way out: the
+  /// platform cannot put us back into landscape behind our back.
+  ///
+  /// On a tablet the outside state allows every orientation, so the screen can
+  /// be landscape with [_forcedFullscreen] false. Nothing reads orientation to
+  /// decide fullscreen, only this flag, so the two are allowed to disagree —
+  /// which is the same thing that lets a landscape window keep showing the
+  /// lecture list.
   Future<void> _toggleFullscreen(bool isFullscreen) async {
     setState(() => _forcedFullscreen = !isFullscreen);
     if (isFullscreen) {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-      await _lockPortrait();
+      await _applyPolicy();
       return;
     }
     // Both landscapes: which way the phone is held is still the user's call.
@@ -448,25 +470,38 @@ class _PlayerPageState extends State<PlayerPage> {
       padding: const EdgeInsets.only(bottom: 24),
       children: <Widget>[
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-          child: Column(
+          padding: const EdgeInsets.fromLTRB(16, 16, 4, 8),
+          // The pin sits at the right end of this row, which puts it directly
+          // under the fullscreen button at the picture's bottom-right corner.
+          // Only reachable here, never in fullscreen: _buildDetails is not in
+          // the tree at all once the video fills the screen, and a pin is not
+          // something to reach for mid-lecture.
+          child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Text(
-                data.lecture.displayName,
-                style: theme.textTheme.titleMedium,
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      data.lecture.displayName,
+                      style: theme.textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      <String>[
+                        data.course.name,
+                        if (data.lecture.start != null)
+                          formatLectureDate(data.lecture.start),
+                        if (data.lecture.duration > Duration.zero)
+                          formatDuration(data.lecture.duration),
+                      ].join(' · '),
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                <String>[
-                  data.course.name,
-                  if (data.lecture.start != null)
-                    formatLectureDate(data.lecture.start),
-                  if (data.lecture.duration > Duration.zero)
-                    formatDuration(data.lecture.duration),
-                ].join(' · '),
-                style: theme.textTheme.bodySmall,
-              ),
+              PinButton(course: data.course),
             ],
           ),
         ),

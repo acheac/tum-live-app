@@ -5,6 +5,8 @@
 /// more for watch progress when signed in.
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../api/models.dart';
@@ -13,6 +15,7 @@ import '../app_scope.dart';
 import '../auth/auth_controller.dart';
 import '../common/async_builder.dart';
 import '../common/formatting.dart';
+import '../common/pin_button.dart';
 import '../player/player_page.dart';
 
 class CoursePage extends StatefulWidget {
@@ -43,6 +46,14 @@ class _CourseData {
 class _CoursePageState extends State<CoursePage> {
   Future<_CourseData>? _future;
 
+  /// The loaded course, kept outside the future so the app bar can reach it.
+  ///
+  /// The bar is built above [AsyncBuilder], one frame before the request
+  /// lands, and the pin button needs the course's id — which only the response
+  /// carries. Null until then, which is also what hides the button while the
+  /// page is still loading.
+  Course? _course;
+
   // The first load happens here rather than in initState: reading an
   // InheritedWidget registers a dependency, which initState is too early for.
   @override
@@ -67,6 +78,9 @@ class _CoursePageState extends State<CoursePage> {
         // Progress is decoration here; the lecture list still works without it.
       }
     }
+    // setState rather than a plain assignment: the app bar is a sibling of the
+    // AsyncBuilder, so nothing else would rebuild it when the course arrives.
+    if (mounted) setState(() => _course = course);
     return _CourseData(course: course, progress: progress);
   }
 
@@ -81,10 +95,72 @@ class _CoursePageState extends State<CoursePage> {
     });
   }
 
+  /// How many lines of the header the course name may take.
+  static const int _titleMaxLines = 3;
+
+  /// The title style, a size down from AppBar's own.
+  ///
+  /// Course names here are long — "Fachschaftsvollversammlung - School of
+  /// Computation, Information and Technology" is one — and at AppBar's default
+  /// titleLarge (22sp) even the first compound word is wider than the bar, so
+  /// Flutter breaks it mid-word: "Fachschaftsvollversammlun / g". Dropping to
+  /// titleMedium's size fits that word on one line and lets the rest wrap at
+  /// spaces, which is also what makes [_titleMaxLines] lines enough.
+  ///
+  /// Only the size is overridden. Taking titleMedium wholesale would take its
+  /// colour too, which belongs to body text rather than to the app bar.
+  TextStyle? get _titleStyle {
+    final ThemeData theme = Theme.of(context);
+    final TextStyle? base =
+        theme.appBarTheme.titleTextStyle ?? theme.textTheme.titleLarge;
+    return base?.copyWith(
+      fontSize: theme.textTheme.titleMedium?.fontSize ?? 16,
+    );
+  }
+
+  /// Room for [_titleMaxLines] lines of [_titleStyle], and no more.
+  ///
+  /// An AppBar's height is fixed rather than intrinsic, so the extra lines have
+  /// to be paid for up front — a title that wraps inside a 56dp bar is clipped
+  /// rather than ellipsized, which reads as a rendering bug. Derived from the
+  /// style rather than hardcoded because it scales with the user's font size:
+  /// at 200% a literal clips exactly the long names this exists to show.
+  double get _titleBarHeight {
+    final TextStyle? style = _titleStyle;
+    final double fontSize = MediaQuery.textScalerOf(
+      context,
+    ).scale(style?.fontSize ?? 16);
+    // Same vertical breathing room a default one-line toolbar leaves.
+    return math.max(
+      kToolbarHeight,
+      _titleMaxLines * fontSize * (style?.height ?? 1.3) + 24,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.courseName ?? widget.slug)),
+      appBar: AppBar(
+        toolbarHeight: _titleBarHeight,
+        titleTextStyle: _titleStyle,
+        // AppBar wraps its title in a DefaultTextStyle with
+        // `softWrap: false, overflow: ellipsis`, so the Material default is a
+        // single clipped line however much room the bar has. Restating all
+        // three here is what overrides that inherited style.
+        title: Text(
+          widget.courseName ?? widget.slug,
+          softWrap: true,
+          maxLines: _titleMaxLines,
+          overflow: TextOverflow.ellipsis,
+        ),
+        // Right after the name, which is where the thing being pinned is.
+        // Only once the course has loaded: pinning needs its id, and the bar
+        // is built before the request lands.
+        actions: <Widget>[
+          if (_course != null)
+            PinButton(course: _course!, compact: true),
+        ],
+      ),
       body: AsyncBuilder<_CourseData>(
         future: _future,
         onRetry: _reload,

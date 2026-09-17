@@ -16,7 +16,7 @@
 ///   player/     video playback, split into page / player / controls.
 ///   common/     loading and error scaffolding, formatting.
 ///   app_scope.dart   dependency wiring, via InheritedNotifier.
-/// ```
+/// ```5
 ///
 /// The rule that keeps this tidy: **`api/` never imports Flutter, and widgets
 /// never build URLs.** Anything that talks to TUM-Live goes through
@@ -28,6 +28,7 @@ import 'package:flutter/material.dart';
 
 import 'src/api/tum_live_api.dart';
 import 'src/brand.dart';
+import 'src/common/orientation.dart';
 import 'src/app_scope.dart';
 import 'src/auth/auth_controller.dart';
 import 'src/auth/cookie_token_source.dart';
@@ -129,6 +130,11 @@ class _TumLiveAppState extends State<TumLiveApp> {
         // WebView never comes up. So: show the app immediately, and let
         // restore() flip it to signed-in whenever it lands. HomePage already
         // reloads when isSignedIn changes.
+        // Rotation is a screen-size decision, not a per-page one, so it is
+        // settled once here for every route. Has to be inside MaterialApp:
+        // MediaQuery, which it measures, does not exist above it.
+        builder: (BuildContext context, Widget? child) =>
+            OrientationPolicy(child: child ?? const SizedBox.shrink()),
         home: const HomePage(),
       ),
     );

@@ -635,7 +635,9 @@ class _PlayerChromeState extends State<PlayerChrome> {
         // gradient still reads at 14 and the bar sits far lower on the video.
         padding: const EdgeInsets.only(top: 14),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(4, 2, 8, 2),
+          // Bottom padding carries the gesture strip so the gradient still
+          // reaches the screen edge while the row sits above it.
+          padding: EdgeInsets.fromLTRB(4, 2, 8, 2 + _gestureInset),
           // One row, the way Bilibili does it: play, track, clock, then the
           // right-hand buttons. Stacking the track above the row read fine on
           // a desktop window but cost a whole row of height, and in a 16:9
@@ -768,7 +770,26 @@ class _PlayerChromeState extends State<PlayerChrome> {
   static const double _overlayOpacity = 0.6;
 
   /// Roughly the control bar's height, so the default corner clears it.
+  /// Add [_gestureInset] for the height the bar actually occupies.
   static const double _controlBarHeight = 54;
+
+  /// How much of the bottom edge belongs to Android's navigation gesture.
+  ///
+  /// In fullscreen the chrome fills the display, so controls pinned to
+  /// `bottom: 0` land in the strip where a vertical drag means "go home". The
+  /// system claims that drag before the Slider ever sees it, so scrubbing from
+  /// near the bottom edge backgrounds the app instead of seeking.
+  ///
+  /// `SafeArea` does not fix it: fullscreen runs under `immersiveSticky`, which
+  /// hides the navigation bar and drops `viewPadding` to zero while the gesture
+  /// keeps firing. `systemGestureInsets` is the only inset that still reports
+  /// the strip once the bar is hidden.
+  ///
+  /// Zero when windowed, where the picture is a 16:9 slot with the lecture list
+  /// underneath and the bar is nowhere near the screen edge.
+  double get _gestureInset => widget.isFullscreen
+      ? MediaQuery.of(context).systemGestureInsets.bottom
+      : 0;
 
   /// Where the user has dragged the inset to, or null while it is still
   /// wherever the player put it.
@@ -826,7 +847,10 @@ class _PlayerChromeState extends State<PlayerChrome> {
     // Measured up from the picture's own bottom edge, so it means the same
     // thing whether or not the picture is letterboxed.
     final double bottom =
-        math.max(belowPicture + margin, _controlBarHeight + margin) -
+        math.max(
+          belowPicture + margin,
+          _controlBarHeight + _gestureInset + margin,
+        ) -
         belowPicture;
     return CameraInset(
       right: margin / picture.width,

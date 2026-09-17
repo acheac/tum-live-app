@@ -16,6 +16,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../app_scope.dart';
 import '../auth/auth_controller.dart';
 import '../brand.dart';
+import 'sso_cover.dart';
 
 class WebViewLoginPage extends StatefulWidget {
   const WebViewLoginPage({super.key});
@@ -28,14 +29,23 @@ class _WebViewLoginPageState extends State<WebViewLoginPage> {
   double _progress = 0;
   String? _error;
 
-  /// True from the moment navigation returns to tum.live until we know whether
-  /// a session came with it.
+  /// True whenever the browser is on our own origin.
   ///
-  /// The landing page is TUM-Live's own website, which is not what the user
-  /// asked for and would otherwise flash up for the second or so the session
-  /// check takes. The WebView stays mounted and loading underneath — this only
-  /// covers it.
-  bool _finishing = false;
+  /// Everything TUM-Live serves is covered, `/saml/` handshake pages included.
+  /// Those render the website for the moment they are on screen, which is the
+  /// flash this exists to stop — it is not only the final landing page that
+  /// shows through. The only pages ever revealed are the identity provider's,
+  /// because those are the only ones the user has anything to do on.
+  ///
+  /// The WebView stays mounted and loading underneath; this just sits on top.
+  bool _finishing = true;
+
+  /// True once the browser has reached the identity provider.
+  ///
+  /// The first load is `/saml/out` on our own origin, so the cover is up before
+  /// the user has done anything, and "Signing you in" would be a lie at that
+  /// point. Only the trip back deserves those words.
+  bool _reachedIdp = false;
 
   /// Shown when a load lands back on tum.live but there is still no session.
   ///
@@ -48,6 +58,18 @@ class _WebViewLoginPageState extends State<WebViewLoginPage> {
   /// loads, and without this every one of them would start its own check.
   bool _checking = false;
 
+  /// Set once sign-in has succeeded, to take the WebView out of the tree before
+  /// this route pops.
+  ///
+  /// The cover is a Flutter widget; the WebView is an Android platform view.
+  /// While the route animates away the two stop agreeing about z-order, and
+  /// the web page draws over the cover — which is why the flash appeared on the
+  /// *home* screen, under the home app bar, after this page was supposedly
+  /// gone. Nothing composited over a platform view can be relied on through a
+  /// route transition, so the platform view has to be gone before the
+  /// transition starts.
+  bool _closing = false;
+
   /// Held so back can take focus off a web text field: the keyboard belongs to
   /// the native WebView, so Flutter's own focus tree cannot put it away.
   InAppWebViewController? _webController;
@@ -59,12 +81,27 @@ class _WebViewLoginPageState extends State<WebViewLoginPage> {
   bool _isLanding(WebUri? url) =>
       url != null && url.host == _host && !url.path.startsWith('/saml/');
 
-  /// Hide the web page as soon as the browser starts heading home, rather than
-  /// after it has finished drawing.
-  void _coverIfLanding(WebUri? url) {
+  /// Keeps the cover in step with wherever the browser has gone.
+  ///
+  /// Driven from the start of a navigation, not the end, so the page is hidden
+  /// before it has a chance to draw.
+  void _syncCover(WebUri? url) {
     if (!mounted || url == null) return;
-    if (_finishing || !_isLanding(url)) return;
-    setState(() => _finishing = true);
+    final bool cover = coverForUrl(
+      url: url,
+      ownHost: _host,
+      noSessionYet: _noSessionYet,
+      covered: _finishing,
+    );
+    // Away from our origin means the identity provider, which the user has to
+    // see. Remembered so the cover can stop saying "opening" once they are on
+    // their way back.
+    final bool reached = _reachedIdp || url.host != _host;
+    if (cover == _finishing && reached == _reachedIdp) return;
+    setState(() {
+      _finishing = cover;
+      _reachedIdp = reached;
+    });
   }
 
   /// After any navigation that lands back on tum.live, see whether a session
@@ -85,6 +122,12 @@ class _WebViewLoginPageState extends State<WebViewLoginPage> {
       await _auth.refreshSession();
       if (!mounted) return;
       if (_auth.isSignedIn) {
+        // Drop the WebView, let that frame land, and only then pop. Popping in
+        // the same frame leaves the platform view alive for the whole
+        // transition, which is the flash this avoids.
+        setState(() => _closing = true);
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted) return;
         Navigator.of(context).pop(true);
         return;
       }
@@ -151,13 +194,42 @@ class _WebViewLoginPageState extends State<WebViewLoginPage> {
                       _buildNoSessionHint(context)
                     else
                       _buildStaySignedInTip(context),
-                    Expanded(child: _buildWebView()),
+                    // Replaced rather than hidden: a platform view that is
+                    // still in the tree still draws, whatever is stacked over
+                    // it.
+                    Expanded(
+                      child: _closing
+                          ? const SizedBox.expand()
+                          : _buildWebView(),
+                    ),
                   ],
                 ),
                 // Opaque, and above the WebView rather than replacing it: the
                 // page has to keep loading for the session to land.
-                if (_finishing)
-                  Positioned.fill(child: _buildFinishing(context)),
+                // Cross-faded rather than switched. The cover goes up and
+                // down several times in one sign-in — out to the identity
+                // provider, back for each SAML hop — and as a hard cut each of
+                // those reads as a flicker, which is what made the flow feel
+                // abrupt even once nothing was leaking through.
+                Positioned.fill(
+                  child: IgnorePointer(
+                    ignoring: !(_finishing || _closing),
+                    child: AnimatedOpacity(
+                      opacity: (_finishing || _closing) ? 1 : 0,
+                      // Asymmetric on purpose. Covering has to be instant —
+                      // fading in over a live page would show that page
+                      // through the cover for the length of the fade, which is
+                      // a slower version of the flash this is all here to
+                      // stop. Uncovering has nothing to hide, so it can take
+                      // its time and hand the login page over gently.
+                      duration: Duration(
+                        milliseconds: (_finishing || _closing) ? 0 : 220,
+                      ),
+                      curve: Curves.easeOut,
+                      child: _buildFinishing(context),
+                    ),
+                  ),
+                ),
               ],
             ),
     );
@@ -178,7 +250,10 @@ class _WebViewLoginPageState extends State<WebViewLoginPage> {
       onProgressChanged: (_, int progress) {
         if (mounted) setState(() => _progress = progress / 100);
       },
-      onLoadStart: (_, WebUri? url) => _coverIfLanding(url),
+      onLoadStart: (_, WebUri? url) => _syncCover(url),
+      // Some of the handshake moves without a page load at all, and a cover
+      // driven only by onLoadStart would miss those.
+      onUpdateVisitedHistory: (_, WebUri? url, _) => _syncCover(url),
       onLoadStop: (_, WebUri? url) => _maybeFinish(url),
       onReceivedError: (_, _, WebResourceError error) {
         if (mounted) setState(() => _error = error.description);
@@ -241,6 +316,11 @@ class _WebViewLoginPageState extends State<WebViewLoginPage> {
     );
   }
 
+  /// The loading screen that stands in for the web page.
+  ///
+  /// Fully opaque: it is faded in and out over a live WebView, and anything
+  /// translucent would show the page through it mid-fade — the very thing the
+  /// cover exists to prevent.
   Widget _buildFinishing(BuildContext context) {
     return ColoredBox(
       color: Theme.of(context).colorScheme.surface,
@@ -251,7 +331,7 @@ class _WebViewLoginPageState extends State<WebViewLoginPage> {
             const CircularProgressIndicator(),
             const SizedBox(height: 20),
             Text(
-              'Signing you in…',
+              _reachedIdp ? 'Signing you in…' : 'Opening TUM login…',
               style: Theme.of(context).textTheme.bodyMedium,
             ),
           ],

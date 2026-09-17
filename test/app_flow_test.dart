@@ -9,12 +9,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:tumlive_player/src/api/models.dart';
 import 'package:tumlive_player/src/api/tum_live_api.dart';
 import 'package:tumlive_player/src/app_scope.dart';
 import 'package:tumlive_player/src/auth/auth_controller.dart';
@@ -27,7 +27,16 @@ import 'package:tumlive_player/src/player/player_page.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
 /// A stand-in TUM-Live holding one public course with two lectures.
-http.Client fakeTumLive({bool noRecording = false}) {
+http.Client fakeTumLive({
+  bool noRecording = false,
+  String courseName = 'Analysis for Informatics',
+  int publicCourses = 1,
+  bool coursePinned = false,
+  bool failPin = false,
+  List<bool>? pinCalls,
+  List<String> pinnedSlugs = const <String>[],
+  List<int> liveCourseIds = const <int>[],
+}) {
   Map<String, dynamic> lectureWithoutVideo(int id) => <String, dynamic>{
     'id': id,
     'name': 'Lecture',
@@ -49,9 +58,66 @@ http.Client fakeTumLive({bool noRecording = false}) {
     'ended': true,
   };
 
+  Map<String, dynamic> courseJson(String slug, String name, int id) =>
+      <String, dynamic>{
+        'id': id,
+        'name': name,
+        'slug': slug,
+        'semester': <String, dynamic>{'teachingTerm': 'W', 'year': 2025},
+        'visibility': 'public',
+        'pinned': true,
+        'lastRecording': lecture(102, '2025-10-21'),
+      };
+
   return MockClient((http.Request request) async {
     final String path = request.url.path;
     Map<String, dynamic>? body;
+
+    // Enough of the auth flow that a test can sign in by seeding a cookie.
+    if (path.endsWith('/auth/token')) {
+      return http.Response(
+        jsonEncode(<String, dynamic>{
+          'access_token': 'access',
+          'token_type': 'Bearer',
+          'expires_in': 3600,
+        }),
+        200,
+        headers: <String, String>{'content-type': 'application/json'},
+      );
+    }
+    if (path.endsWith('/users/me')) {
+      return http.Response(
+        jsonEncode(<String, dynamic>{
+          'user': <String, dynamic>{'id': 7, 'name': 'Ada Lovelace'},
+        }),
+        200,
+        headers: <String, String>{'content-type': 'application/json'},
+      );
+    }
+    // POST /courses/{id}/pin — recorded so a test can assert what was asked
+    // for, and optionally failed so the revert path is reachable.
+    if (path.endsWith('/pin')) {
+      final Map<String, dynamic> sent =
+          jsonDecode(request.body) as Map<String, dynamic>;
+      pinCalls?.add(sent['pin'] as bool);
+      if (failPin) return http.Response('{"message":"nope"}', 500);
+      return http.Response('{}', 200, headers: <String, String>{
+        'content-type': 'application/json',
+      });
+    }
+    if (path.endsWith('/courses/pinned')) {
+      body = <String, dynamic>{
+        'courses': <dynamic>[
+          for (int i = 0; i < pinnedSlugs.length; i++)
+            courseJson(pinnedSlugs[i], 'Pinned ${pinnedSlugs[i]}', 500 + i),
+        ],
+      };
+      return http.Response(
+        jsonEncode(body),
+        200,
+        headers: <String, String>{'content-type': 'application/json'},
+      );
+    }
 
     if (path.endsWith('/semesters')) {
       body = <String, dynamic>{
@@ -59,18 +125,51 @@ http.Client fakeTumLive({bool noRecording = false}) {
         'semesters': <dynamic>[
           <String, dynamic>{'teachingTerm': 'W', 'year': 2025},
           <String, dynamic>{'teachingTerm': 'S', 'year': 2025},
+          // The real list runs to sixteen terms and ends with these two, which
+          // the server has always sent and which have never had a course.
+          for (int y = 2024; y >= 2019; y--) ...<dynamic>[
+            <String, dynamic>{'teachingTerm': 'W', 'year': y},
+            <String, dynamic>{'teachingTerm': 'S', 'year': y},
+          ],
+          <String, dynamic>{'teachingTerm': 'S', 'year': 1970},
+          <String, dynamic>{'teachingTerm': 'W', 'year': 23},
         ],
       };
     } else if (path.endsWith('/courses/live')) {
-      body = <String, dynamic>{'liveCourses': <dynamic>[]};
+      // One live stream per id. The ids matter: the home screen keeps only the
+      // ones that are also enrolled or pinned.
+      body = <String, dynamic>{
+        'liveCourses': <dynamic>[
+          for (final int id in liveCourseIds)
+            <String, dynamic>{
+              'course': <String, dynamic>{
+                'id': id,
+                'name': 'Live course $id',
+                'slug': 'live-$id',
+                'semester': <String, dynamic>{
+                  'teachingTerm': 'W',
+                  'year': 2025,
+                },
+                'visibility': 'public',
+              },
+              'stream': <String, dynamic>{
+                'id': 9000 + id,
+                'name': 'Live lecture',
+                'courseId': id,
+                'liveNow': true,
+              },
+            },
+        ],
+      };
     } else if (path.endsWith('/courses/analysis')) {
       body = <String, dynamic>{
         'course': <String, dynamic>{
           'id': 42,
-          'name': 'Analysis for Informatics',
+          'name': courseName,
           'slug': 'analysis',
           'semester': <String, dynamic>{'teachingTerm': 'W', 'year': 2025},
           'visibility': 'public',
+          'pinned': coursePinned,
           'streams': <dynamic>[
             lecture(101, '2025-10-14'),
             lecture(102, '2025-10-21'),
@@ -101,7 +200,7 @@ http.Client fakeTumLive({bool noRecording = false}) {
       body = <String, dynamic>{
         'course': <String, dynamic>{
           'id': 42,
-          'name': 'Analysis for Informatics',
+          'name': courseName,
           'slug': 'analysis',
         },
         'stream': noRecording ? lectureWithoutVideo(id) : lecture(id, '2025-10-21'),
@@ -111,12 +210,23 @@ http.Client fakeTumLive({bool noRecording = false}) {
         'courses': <dynamic>[
           <String, dynamic>{
             'id': 42,
-            'name': 'Analysis for Informatics',
+            'name': courseName,
             'slug': 'analysis',
             'semester': <String, dynamic>{'teachingTerm': 'W', 'year': 2025},
             'visibility': 'public',
             'lastRecording': lecture(102, '2025-10-21'),
           },
+          // Filler, so a test can ask for more than one page of them. Named by
+          // index rather than by the real course, which stays first.
+          for (int i = 1; i < publicCourses; i++)
+            <String, dynamic>{
+              'id': 1000 + i,
+              'name': 'Filler course $i',
+              'slug': 'filler-$i',
+              'semester': <String, dynamic>{'teachingTerm': 'W', 'year': 2025},
+              'visibility': 'public',
+              'lastRecording': lecture(102, '2025-10-21'),
+            },
         ],
       };
     }
@@ -131,13 +241,46 @@ http.Client fakeTumLive({bool noRecording = false}) {
 }
 
 /// Boots the app's real widget tree against [client].
-Future<AuthController> pumpApp(WidgetTester tester, http.Client client) async {
+/// A surface tall enough that a whole group of course tiles is built.
+///
+/// `SliverList.builder` only builds what is on screen plus a small cache, and
+/// `widgetList` only finds what was built — so on the default 800x600 surface
+/// the fifth tile of a group is simply absent and counting them undercounts.
+void useTallScreen(WidgetTester tester) {
+  tester.view.physicalSize = const Size(1080, 3000);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+/// Sizes the test surface like the phone this was reported on.
+///
+/// The default 800x600 surface is more than twice a phone's width, so a title
+/// that wraps or truncates on the device fits on one comfortable line in a test
+/// and every assertion about it passes vacuously. Both title tests below are
+/// only meaningful at a real phone's width.
+void useNarrowPhone(WidgetTester tester) {
+  tester.view.physicalSize = const Size(1080, 2352);
+  tester.view.devicePixelRatio = 3;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+Future<AuthController> pumpApp(
+  WidgetTester tester,
+  http.Client client, {
+  bool signedIn = false,
+}) async {
+  final MemoryCredentialStore store = MemoryCredentialStore();
+  // A stored cookie is all restore() needs to come back signed in, and
+  // fakeTumLive answers the two endpoints it checks it against.
+  if (signedIn) await store.writeSessionCookie('cookie-value');
   final AuthController auth = AuthController(
-    source: CookieTokenSource(store: MemoryCredentialStore(), client: client),
+    source: CookieTokenSource(store: store, client: client),
     client: client,
   );
-  // No stored cookie: settles straight into signedOut, which is the state a
-  // first-time user sees.
+  // Without a stored cookie this settles straight into signedOut, which is the
+  // state a first-time user sees.
   await auth.restore();
 
   await tester.pumpWidget(
@@ -181,10 +324,54 @@ void main() {
 
     expect(find.text('WS 2025'), findsOneWidget);
 
-    await tester.tap(find.byType(DropdownButton<Semester>));
+    // A PopupMenuButton, not a DropdownButton: the same menu carries the
+    // pinned courses, and a dropdown's label is its selection, so picking a
+    // course would leave its name where the semester belongs.
+    await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
     await tester.pumpAndSettle();
 
     expect(find.text('SS 2025'), findsWidgets);
+  });
+
+  testWidgets('the picker leaves out the placeholder semesters',
+      (WidgetTester tester) async {
+    // `/semesters` ends with `S 1970` and `W 23` — an epoch default and a
+    // year that never parsed. Both render as ordinary terms at the bottom of
+    // the picker and neither has ever had a course.
+    await pumpApp(tester, fakeTumLive());
+
+    await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('SS 1970'), findsNothing);
+    expect(find.text('WS 23'), findsNothing);
+    // The real ones are still all there.
+    expect(find.text('SS 2019'), findsWidgets);
+  });
+
+  testWidgets('the semester menu stays on screen instead of being moved',
+      (WidgetTester tester) async {
+    // Sixteen terms is taller than a phone, and a menu that cannot fit under
+    // its button gets repositioned somewhere it does fit — it opens shifted up
+    // the screen, away from what was tapped. Bounded, it scrolls instead.
+    useNarrowPhone(tester);
+    await pumpApp(tester, fakeTumLive());
+
+    final Rect button = tester.getRect(
+      find.byKey(const ValueKey<String>('semester-menu')),
+    );
+    await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+    await tester.pumpAndSettle();
+
+    // The menu's own scroll view: its box is the menu's box.
+    final Rect menu = tester.getRect(
+      find.byType(SingleChildScrollView).last,
+    );
+    final Size screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+    expect(menu.height, lessThanOrEqualTo(screen.height / 2 + 1));
+    expect(menu.bottom, lessThanOrEqualTo(screen.height));
+    // And it is still anchored under the button that opened it.
+    expect(menu.top, greaterThanOrEqualTo(button.top));
   });
 
   testWidgets('tapping a course opens it and lists its lectures',
@@ -200,6 +387,558 @@ void main() {
     expect(find.textContaining('14.10.2025'), findsOneWidget);
     // Duration from the `duration` field, not computed from start/end.
     expect(find.textContaining('2:00:00'), findsWidgets);
+  });
+
+  testWidgets('the header has room for a wrapped course name',
+      (WidgetTester tester) async {
+    // A real TUM course name, and the one this page was reported on. AppBar
+    // wraps its title in a DefaultTextStyle with `softWrap: false, overflow:
+    // ellipsis`, so a plain Text renders one clipped line however tall the bar
+    // is — "Fachschaftsvollversamml…" — while the lecture card below wraps the
+    // same string fine.
+    //
+    // How many lines the name actually needs is not assertable here: the test
+    // font draws every glyph one em wide, so text measures about twice its
+    // width under Roboto and any line count would describe the test font
+    // rather than the phone. What is font-independent is that the bar is tall
+    // enough for the lines it permits — a title that wraps inside a 56dp bar
+    // is clipped rather than ellipsized, which reads as a rendering bug.
+    const String name =
+        'Fachschaftsvollversammlung - School of Computation, '
+        'Information and Technology';
+    useNarrowPhone(tester);
+    await pumpApp(tester, fakeTumLive(courseName: name));
+
+    await tester.tap(find.text(name).first);
+    await tester.pumpAndSettle();
+
+    final Finder title = find.descendant(
+      of: find.byType(AppBar),
+      matching: find.text(name),
+    );
+    expect(tester.widget<Text>(title).maxLines, 3);
+    expect(tester.widget<Text>(title).softWrap, isTrue);
+    expect(
+      tester.getRect(title).height,
+      lessThanOrEqualTo(tester.getRect(find.byType(AppBar)).height),
+    );
+  });
+
+  testWidgets('the header title is a size down from the AppBar default',
+      (WidgetTester tester) async {
+    // At AppBar's own titleLarge, "Fachschaftsvollversammlung" is wider than
+    // the bar and Flutter's last resort is to split it: the header read
+    // "Fachschaftsvollversammlun / g - School of Computation…". The smaller
+    // size is what fits that word on one line, so the rest can wrap at spaces.
+    // Asserted as a size relative to titleLarge because the exact width the
+    // word takes depends on the font, which differs under test.
+    const String name = 'Fachschaftsvollversammlung Informatik';
+    useNarrowPhone(tester);
+    await pumpApp(tester, fakeTumLive(courseName: name));
+
+    await tester.tap(find.text(name).first);
+    await tester.pumpAndSettle();
+
+    final RenderParagraph paragraph = tester.renderObject<RenderParagraph>(
+      find.descendant(of: find.byType(AppBar), matching: find.text(name)),
+    );
+    final TextTheme textTheme = Theme.of(
+      tester.element(find.byType(AppBar)),
+    ).textTheme;
+    expect(
+      paragraph.text.style?.fontSize,
+      lessThan(textTheme.titleLarge!.fontSize!),
+    );
+  });
+
+  testWidgets('leaving the player on a phone does not unlock rotation',
+      (WidgetTester tester) async {
+    // dispose used to hand back DeviceOrientation.values unconditionally, to
+    // undo the player's own landscape pin. On a phone that is not a restore
+    // but a change: the course list the user lands back on had rotation off,
+    // and would come back with it on.
+    final List<List<String>> requested = <List<String>>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (MethodCall call) async {
+        if (call.method == 'SystemChrome.setPreferredOrientations') {
+          requested.add(List<String>.from(call.arguments as List<dynamic>));
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+
+    useNarrowPhone(tester);
+    await pumpApp(tester, fakeTumLive());
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pumpAndSettle();
+
+    requested.clear();
+    // Not tester.pageBack(): the player has no AppBar to hold a default back
+    // button, so it carries its own.
+    await tester.tap(find.byKey(const ValueKey<String>('player-back-button')));
+    await tester.pumpAndSettle();
+
+    // Whatever it asked for on the way out, it was not every orientation.
+    expect(requested, isNotEmpty);
+    for (final List<String> call in requested) {
+      expect(call, <String>['DeviceOrientation.portraitUp']);
+    }
+  });
+
+  testWidgets('the search field filters the course list',
+      (WidgetTester tester) async {
+    await pumpApp(tester, fakeTumLive());
+    expect(find.text('Analysis for Informatics'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('course-search')),
+      'analysis',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Analysis for Informatics'), findsOneWidget);
+
+    // A query nothing matches replaces the sections rather than leaving them
+    // looking empty for no stated reason.
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('course-search')),
+      'quantum',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Analysis for Informatics'), findsNothing);
+    expect(find.textContaining('matches'), findsOneWidget);
+
+    // Clearing brings everything back, and takes the clear button with it.
+    await tester.tap(
+      find.byKey(const ValueKey<String>('course-search-clear')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Analysis for Informatics'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('course-search-clear')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('searching without an umlaut still finds the course',
+      (WidgetTester tester) async {
+    // The reason foldForSearch exists, exercised through the real field: an
+    // English keyboard cannot type the ü that the course name has.
+    await pumpApp(
+      tester,
+      fakeTumLive(courseName: 'Einführung in die Softwaretechnik'),
+    );
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('course-search')),
+      'einfuhrung',
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Einführung in die Softwaretechnik'), findsWidgets);
+  });
+
+  testWidgets('the public list shows five at a time, and rotates',
+      (WidgetTester tester) async {
+    // 12 courses rotate 5, 5, 2 and then come back round. The order is
+    // shuffled at load, so the assertions are about counts and disjointness
+    // rather than which course lands where.
+    useTallScreen(tester);
+    await pumpApp(tester, fakeTumLive(publicCourses: 12));
+
+    Set<String> shown() => tester
+        .widgetList<Text>(find.textContaining(RegExp('Filler course|Analysis')))
+        .map((Text t) => t.data!)
+        .toSet();
+
+    final Finder rotate = find.byKey(const ValueKey<String>('public-rotate'));
+    expect(rotate, findsOneWidget);
+    expect(find.text('1–5 of 12'), findsOneWidget);
+    final Set<String> first = shown();
+    expect(first.length, 5);
+
+    await tester.tap(rotate);
+    await tester.pumpAndSettle();
+    expect(find.text('6–10 of 12'), findsOneWidget);
+    final Set<String> second = shown();
+    expect(second.length, 5);
+    // "Another five" has to mean five you have not just seen.
+    expect(first.intersection(second), isEmpty);
+
+    // The remainder is short rather than padded from the top again.
+    await tester.tap(rotate);
+    await tester.pumpAndSettle();
+    expect(find.text('11–12 of 12'), findsOneWidget);
+    expect(shown().length, 2);
+
+    // And then round to the start, so the button never dead-ends.
+    await tester.tap(rotate);
+    await tester.pumpAndSettle();
+    expect(find.text('1–5 of 12'), findsOneWidget);
+    expect(shown(), first);
+  });
+
+  testWidgets('a semester with five or fewer has no rotate button',
+      (WidgetTester tester) async {
+    // Nothing to rotate to, so offering it would be a button that changes
+    // nothing.
+    await pumpApp(tester, fakeTumLive(publicCourses: 5));
+    expect(find.byKey(const ValueKey<String>('public-rotate')), findsNothing);
+  });
+
+  testWidgets('searching is never capped at five',
+      (WidgetTester tester) async {
+    // The cap is for browsing. Hiding search matches behind a rotate button is
+    // the one thing search must not do.
+    useTallScreen(tester);
+    await pumpApp(tester, fakeTumLive(publicCourses: 12));
+    expect(find.byKey(const ValueKey<String>('public-rotate')), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('course-search')),
+      'filler',
+    );
+    await tester.pumpAndSettle();
+
+    // All 11 fillers, not 5, and the button is gone while the query stands.
+    expect(find.textContaining('Filler course'), findsNWidgets(11));
+    expect(find.byKey(const ValueKey<String>('public-rotate')), findsNothing);
+  });
+
+  group('pinning', () {
+    testWidgets('the course page pins, and the icon fills in',
+        (WidgetTester tester) async {
+      final List<bool> calls = <bool>[];
+      await pumpApp(
+        tester,
+        fakeTumLive(pinCalls: calls),
+        signedIn: true,
+      );
+      await tester.tap(find.text('Analysis for Informatics').first);
+      await tester.pumpAndSettle();
+
+      final Finder pin = find.byKey(const ValueKey<String>('pin-button'));
+      expect(pin, findsOneWidget);
+      // Outlined until it is pinned.
+      expect(
+        tester.widget<Icon>(find.descendant(of: pin, matching: find.byType(Icon))).icon,
+        Icons.push_pin_outlined,
+      );
+
+      await tester.tap(pin);
+      await tester.pumpAndSettle();
+
+      expect(calls, <bool>[true]);
+      expect(
+        tester.widget<Icon>(find.descendant(of: pin, matching: find.byType(Icon))).icon,
+        Icons.push_pin,
+      );
+    });
+
+    testWidgets('an already pinned course unpins',
+        (WidgetTester tester) async {
+      final List<bool> calls = <bool>[];
+      await pumpApp(
+        tester,
+        fakeTumLive(coursePinned: true, pinCalls: calls),
+        signedIn: true,
+      );
+      await tester.tap(find.text('Analysis for Informatics').first);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey<String>('pin-button')));
+      await tester.pumpAndSettle();
+      expect(calls, <bool>[false]);
+    });
+
+    testWidgets('a failed pin puts the icon back and says so',
+        (WidgetTester tester) async {
+      // Every other failure in this app is silent, but the user watched this
+      // icon change — leaving it filled would have the UI claiming a pin the
+      // server refused.
+      await pumpApp(
+        tester,
+        fakeTumLive(failPin: true),
+        signedIn: true,
+      );
+      await tester.tap(find.text('Analysis for Informatics').first);
+      await tester.pumpAndSettle();
+
+      final Finder pin = find.byKey(const ValueKey<String>('pin-button'));
+      await tester.tap(pin);
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<Icon>(find.descendant(of: pin, matching: find.byType(Icon))).icon,
+        Icons.push_pin_outlined,
+      );
+      expect(find.textContaining('Could not pin'), findsOneWidget);
+    });
+
+    testWidgets('signed out there is no pin button at all',
+        (WidgetTester tester) async {
+      // Pinning is per-account and the endpoint needs a token, so a button
+      // here could only ever fail.
+      await pumpApp(tester, fakeTumLive());
+      await tester.tap(find.text('Analysis for Informatics').first);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey<String>('pin-button')), findsNothing);
+    });
+
+    testWidgets('the player page carries the pin below the picture',
+        (WidgetTester tester) async {
+      final List<bool> calls = <bool>[];
+      await pumpApp(tester, fakeTumLive(pinCalls: calls), signedIn: true);
+      await tester.tap(find.text('Analysis for Informatics').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('21.10.2025'));
+      await tester.pumpAndSettle();
+
+      final Finder pin = find.byKey(const ValueKey<String>('pin-button'));
+      expect(pin, findsOneWidget);
+      // Below the video, which is what "under the fullscreen button" means.
+      expect(
+        tester.getRect(pin).top,
+        greaterThan(tester.getRect(find.byType(LecturePlayer)).bottom - 1),
+      );
+
+      await tester.tap(pin);
+      await tester.pumpAndSettle();
+      expect(calls, <bool>[true]);
+    });
+
+    testWidgets('the menu switches My courses for the pinned ones',
+        (WidgetTester tester) async {
+      await pumpApp(
+        tester,
+        fakeTumLive(pinnedSlugs: const <String>['algebra']),
+        signedIn: true,
+      );
+
+      // Not on the page to begin with, and no count beside the semester:
+      // the pinned list is a view now, not a badge.
+      expect(find.text('Pinned algebra'), findsNothing);
+      expect(find.text('My courses'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pinned courses'));
+      await tester.pumpAndSettle();
+
+      // My courses gave way to the pinned ones.
+      expect(find.text('Pinned courses'), findsOneWidget);
+      expect(find.text('My courses'), findsNothing);
+      expect(find.text('Pinned algebra'), findsOneWidget);
+      // And the rest of the page is out of the way, so the search field below
+      // means only what this view shows.
+      expect(find.text('Public courses'), findsNothing);
+    });
+
+    testWidgets('the pinned view is a toggle, not a one-way door',
+        (WidgetTester tester) async {
+      await pumpApp(
+        tester,
+        fakeTumLive(pinnedSlugs: const <String>['algebra']),
+        signedIn: true,
+      );
+
+      Future<void> openMenu() async {
+        await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+        await tester.pumpAndSettle();
+      }
+
+      await openMenu();
+      await tester.tap(find.text('Pinned courses'));
+      await tester.pumpAndSettle();
+
+      // The same entry now offers the way back.
+      await openMenu();
+      await tester.tap(find.text('My courses').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('My courses'), findsOneWidget);
+      expect(find.text('Public courses'), findsOneWidget);
+    });
+
+    testWidgets('picking a semester leaves the pinned view',
+        (WidgetTester tester) async {
+      // /courses/pinned takes no semester, so staying put would swallow the
+      // choice — the label would change and the list would not.
+      await pumpApp(
+        tester,
+        fakeTumLive(pinnedSlugs: const <String>['algebra']),
+        signedIn: true,
+      );
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pinned courses'));
+      await tester.pumpAndSettle();
+      expect(find.text('Pinned courses'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('SS 2025').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('SS 2025'), findsOneWidget);
+      expect(find.text('Pinned courses'), findsNothing);
+      expect(find.text('My courses'), findsOneWidget);
+    });
+
+    testWidgets('switching views clears the search field',
+        (WidgetTester tester) async {
+      await pumpApp(
+        tester,
+        fakeTumLive(pinnedSlugs: const <String>['algebra'], publicCourses: 12),
+        signedIn: true,
+      );
+
+      final Finder field = find.byKey(const ValueKey<String>('course-search'));
+      await tester.enterText(field, 'filler');
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(field).controller!.text, 'filler');
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pinned courses'));
+      await tester.pumpAndSettle();
+
+      // Empty field, and the pinned course visible rather than filtered away
+      // by a query aimed at a list this view does not show.
+      expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+      expect(find.text('Pinned algebra'), findsOneWidget);
+      expect(find.text('No pinned courses match.'), findsNothing);
+    });
+
+    testWidgets('leaving the pinned view clears it too',
+        (WidgetTester tester) async {
+      await pumpApp(
+        tester,
+        fakeTumLive(pinnedSlugs: const <String>['algebra']),
+        signedIn: true,
+      );
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pinned courses'));
+      await tester.pumpAndSettle();
+
+      final Finder field = find.byKey(const ValueKey<String>('course-search'));
+      await tester.enterText(field, 'algebra');
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('My courses').last);
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+      expect(find.text('Public courses'), findsOneWidget);
+    });
+
+    testWidgets('search inside the pinned view searches only pinned courses',
+        (WidgetTester tester) async {
+      await pumpApp(
+        tester,
+        fakeTumLive(pinnedSlugs: const <String>['algebra'], publicCourses: 12),
+        signedIn: true,
+      );
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pinned courses'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('course-search')),
+        'filler',
+      );
+      await tester.pumpAndSettle();
+
+      // "Filler course N" exists, but only in the public list this view hides.
+      // A search from in here must not drag it back in.
+      expect(find.textContaining('Filler course'), findsNothing);
+      expect(find.text('No pinned courses match.'), findsOneWidget);
+    });
+
+    testWidgets('an empty pinned view says how to fill it',
+        (WidgetTester tester) async {
+      await pumpApp(tester, fakeTumLive(), signedIn: true);
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pinned courses'));
+      await tester.pumpAndSettle();
+
+      // Offered even with nothing pinned, because this is where the empty
+      // state gets explained.
+      expect(find.textContaining('Open a course and tap the pin'), findsOneWidget);
+    });
+
+    testWidgets('a pinned course is marked in the course list',
+        (WidgetTester tester) async {
+      // The list the pin is drawn from is the pinned list, not Course.pinned,
+      // which the server only sets on some endpoints.
+      await pumpApp(
+        tester,
+        fakeTumLive(pinnedSlugs: const <String>['algebra']),
+        signedIn: true,
+      );
+
+      await tester.tap(find.byKey(const ValueKey<String>('semester-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pinned courses'));
+      await tester.pumpAndSettle();
+
+      final Finder tile = find.ancestor(
+        of: find.text('Pinned algebra'),
+        matching: find.byType(ListTile),
+      );
+      expect(
+        find.descendant(of: tile, matching: find.byIcon(Icons.push_pin)),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets('Live now keeps only the signed-in user\'s own courses',
+      (WidgetTester tester) async {
+    // /courses/live is every stream on TUM-Live, and this section sits above
+    // everything else. Course 500 is the pinned one the fake serves; 999 is
+    // somebody else's lecture.
+    await pumpApp(
+      tester,
+      fakeTumLive(
+        pinnedSlugs: const <String>['algebra'],
+        liveCourseIds: const <int>[500, 999],
+      ),
+      signedIn: true,
+    );
+
+    expect(find.text('Live now'), findsOneWidget);
+    expect(find.text('Live course 500'), findsOneWidget);
+    expect(find.text('Live course 999'), findsNothing);
+  });
+
+  testWidgets('signed out, Live now is not narrowed to nothing',
+      (WidgetTester tester) async {
+    // There is no "my courses" to narrow to, and anything a signed-out user
+    // can see live is public anyway — so filtering here would only empty the
+    // section.
+    await pumpApp(tester, fakeTumLive(liveCourseIds: const <int>[500, 999]));
+
+    expect(find.text('Live course 500'), findsOneWidget);
+    expect(find.text('Live course 999'), findsOneWidget);
   });
 
   testWidgets('a failing server shows a retry instead of a blank screen',

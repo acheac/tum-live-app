@@ -204,6 +204,35 @@ of the same interface before shipping on those platforms.
 
 ---
 
+**A platform view outlives the widgets stacked over it.** Signing in used to
+flash TUM-Live's website on the *home* screen, under the home app bar, after
+the login page had closed. The cover over the WebView is a Flutter widget; the
+WebView is an Android platform view, and while a route animates away the two
+stop agreeing about z-order — the page draws straight over the cover. So the
+login page takes the WebView out of the tree, waits for that frame, and only
+then pops. Hiding it is not enough: a platform view still in the tree still
+draws.
+
+Two wrong turns on the way, both worth not repeating. "Look for a bright frame"
+found nothing across 131 captures, because TUM's login page follows the system
+dark theme — the flash is not white. And `HeadlessInAppWebView` looks like an
+excellent suspect, since "headless" means *no Flutter widget*, not invisible,
+and it defaults to `Size(-1, -1)` — MATCH_PARENT. It is innocent: the Android
+source calls `setVisibility(View.INVISIBLE)` and adds it at index 0, behind
+Flutter. Read that source before blaming it.
+
+What settled it was a burst of `adb` screencaps through a real sign-in and then
+*looking* at the frames, after the measurements said nothing.
+
+**The sign-in transitions are asymmetric, and have to be.** The login route
+cross-fades rather than sliding, because a platform view does not slide with
+the route it sits in — it lags the Flutter content and arrives with a snap.
+Inside the page the cover fades out over 220ms but goes up in 0: uncovering has
+nothing to hide, while fading *in* over a live page would show that page
+through a half-transparent cover for the length of the fade, which is the flash
+again at quarter speed. Any future animation here inherits that rule — hiding
+is instant, revealing is gradual.
+
 ## API endpoints in use
 
 Relative to `https://tum.live/api/v2`. Full list at `/api/v2/docs`.
@@ -214,6 +243,7 @@ Relative to `https://tum.live/api/v2`. Full list at `/api/v2/docs`.
 | Public course listing | `GET /courses?year=&term=` |
 | Course + all its lectures | `GET /courses/{slug}?year=&term=` |
 | Enrolled / pinned / live | `GET /courses/enrolled`, `/courses/pinned`, `/courses/live` |
+| Pin / unpin | `POST /courses/{id}/pin` with `{"pin": bool}` |
 | One lecture (signed URLs) | `GET /streams/{slug}/{id}` |
 | Chapter markers | `GET /streams/{slug}/{id}/sections` |
 | Watch progress | `GET /progress?stream_ids=…`, `PATCH /progress/{id}` |
@@ -231,6 +261,19 @@ dart run tool/api_smoke.dart
 ```
 
 ---
+
+**The published swagger is stale about pinning.** `GET /api/v2/docs/swagger.json`
+documents `GET/POST /user/pinned` and `DELETE /user/pinned/{courseID}`. None of
+those exist on the deployed server — all three answer 404, while the
+`/courses/pinned` and `/courses/{id}/pin` this app uses answer 401, which is an
+endpoint that exists and wants a token. Probe with an unauthenticated `curl` and
+read 401 as "real, needs auth" before believing the spec over the server.
+
+Pins are server-side only; nothing about them is stored on the device. The home
+screen fetches them once per load, so a pin made elsewhere — the TUM-Live
+website in a browser, say — shows up only after something refetches: pull to
+refresh, a semester change, signing in or out, or a pin made in the app (see
+`pinRevision`).
 
 ## Tests
 
@@ -264,15 +307,98 @@ around a change rather than by any failing test:
 
 ## Current state
 
-**Works:** browsing by semester, course lists, lecture lists with watch-progress
-bars, playback with resume, progress sync, camera-angle switching (remembered
-between lectures and launches), playback speed, fullscreen, fused mode, and
-sign-in on WebView platforms.
+**Works:** browsing by semester, course lists with search, lecture lists with
+watch-progress bars, playback with resume, progress sync, camera-angle
+switching (remembered between lectures and launches), playback speed,
+fullscreen, fused mode, and sign-in on WebView platforms.
 
-**Fullscreen is button-only.** The page pins the orientation while it is open,
-so the accelerometer never decides: rotating a phone lying on a desk used to
-throw a lecture into fullscreen unasked. Back leaves fullscreen first and the
-lecture second, for both the on-screen arrow and the system gesture.
+**The home screen searches in memory, and shows public courses five at a
+time.** How many courses `/courses` returns depends on who is asking:
+unauthenticated it serves only `public` ones, which across all eighteen
+semesters the API knows peaks at 20 (W2022, a 77 KB response), but signed in it
+also returns everything a TUM account may see — SS 2024 comes back with 75.
+Either way it is one request whose result is already in memory, so filtering is
+a `where` over a loaded list, with no round trip and no debounce.
+
+Worth knowing when measuring this API: a `curl` without a session will
+understate every course count by roughly four times, which is how the
+twenty-course figure above got quoted as the maximum at first. `foldForSearch` in `common/course_search.dart` strips German
+diacritics from both the query and the name, because an English phone keyboard
+cannot type the `ü` in *Einführung* and the catalogue is full of them.
+
+**Live now is narrowed to the user's own courses.** `/courses/live` returns
+every stream running anywhere on TUM-Live, and the section sits above
+everything else on the home screen — in term that is a column of other people's
+lectures before the user reaches their own. Signed in it keeps only courses
+that are enrolled or pinned. Signed out it is left alone: there is no "their
+own" to narrow to, and anything a signed-out user can see live is public
+anyway, so filtering would only empty the section.
+
+Hard to try by hand — between terms `/courses/live` returns nothing at all, so
+the widget tests are the only way this gets exercised.
+
+**Pinning lives on the pages that show a course, and the pinned list lives in
+the semester menu.** `common/pin_button.dart` is the one toggle, carried by the
+course page's app bar (right after the name) and by the player page's row under
+the picture (right end, so it falls under the fullscreen button; never in
+fullscreen, where `_buildDetails` is not in the tree). The toggle is optimistic
+and reverts with a message on failure — the only visible error in the app,
+because the user watched the icon change. `pinRevision` is what tells the home
+screen to refetch, since its pinned list is a separate request from the course
+the pin was toggled on.
+
+The pinned courses are a *view*, reached from one entry in the semester picker
+rather than having a section of their own on the main list. Choosing it swaps
+"My courses" for "Pinned courses" and hides live, enrolled and public entirely,
+so the page reads as its own screen while staying on the same route — the
+semester picker and the search field belong to both views, and pushing a real
+page would either duplicate them or leave the pinned list unsearchable. The
+same menu entry toggles back. That sharing is also why the picker is a
+`PopupMenuButton` rather than the `DropdownButton` it replaced: a dropdown's
+label *is* its selection, so the entry would leave its own name sitting where
+the semester belongs.
+
+Hiding the other sections is what makes the shared search field honest: it
+filters whatever the page is showing, so a search made from inside the pinned
+list must not drag a public course back in.
+
+Pinned courses are marked in any list by a small pin stacked over the chevron,
+and that flag comes from the pinned list rather than from `Course.pinned` —
+the server only sets that field on some endpoints, while the pinned list is
+definitive for every course on the page.
+
+The five-at-a-time cap is presentation, not performance: `SliverList.builder`
+builds only what is on screen, so seventy-five rows cost what five do. It
+exists so the landing screen is a handful of suggestions rather than a wall. The list is shuffled once per
+load and the rotate button walks it in non-overlapping groups, so "another
+five" is five you have not seen and pressing on eventually shows all of them; a
+fresh random draw each press could repeat what was just there. The last group
+is short when the count is not a multiple of five. Searching is never capped —
+hiding a match behind that button is the one thing search must not do.
+
+**Fullscreen is button-only.** The page pins landscape while it is open, so the
+accelerometer never decides: rotating a phone lying on a desk used to throw a
+lecture into fullscreen unasked. Back leaves fullscreen first and the lecture
+second, for both the on-screen arrow and the system gesture.
+
+**Rotation is a screen-size decision, made once.** `OrientationPolicy` in
+`common/orientation.dart` wraps every route and allows portrait only below
+Material's 600dp shortest side, everything above it. A phone has exactly one
+use for landscape — the player's fullscreen, entered by the button — so
+rotating anywhere else only ever turned a portrait list of courses sideways. A
+tablet is wide enough for those lists to read either way, and is usually held
+or docked in one, so there it stays on.
+
+The screen is asked rather than the platform: one build runs on both, and a
+foldable crosses the line while running, so the policy is re-applied on size
+changes rather than set once at startup. Two consequences worth knowing:
+`PlayerPage.dispose` restores *that policy* rather than
+`DeviceOrientation.values`, which would hand rotation back switched on for the
+course list the user is returning to; and on a tablet the screen can be
+landscape with `_forcedFullscreen` false, so the flag and the orientation are
+allowed to disagree. Nothing reads orientation to decide fullscreen, only the
+flag — the same thing that lets a landscape window keep showing the lecture
+list.
 
 **Switching lecture does not rebuild the page.** Tapping a sibling changes
 `_lectureId` in state and reloads only what moved; the list and heading stay put

@@ -193,6 +193,7 @@ void main() {
     List<Widget> extraControls = const <Widget>[],
     VoidCallback? onToggleFullscreen,
     String? overlayVideoUrl,
+    double gestureInsetBottom = 0,
   }) async {
     VideoPlayerPlatform.instance = fake;
     await tester.pumpWidget(
@@ -202,14 +203,23 @@ void main() {
         // can sit in a 16:9 slot with a lecture list underneath. Material
         // widgets inside it still need a Material ancestor, which PlayerPage
         // provides in the real app.
-        home: Scaffold(
-          body: LecturePlayer(
-            videoUrl: 'https://example.invalid/playlist.m3u8',
-            overlayVideoUrl: overlayVideoUrl,
-            title: 'TUMLive Player',
-            isFullscreen: isFullscreen,
-            extraControls: extraControls,
-            onToggleFullscreen: onToggleFullscreen,
+        // MediaQuery goes *under* MaterialApp: the app builds its own from the
+        // test view, so overriding above it would just be replaced.
+        home: Builder(
+          builder: (BuildContext context) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              systemGestureInsets: EdgeInsets.only(bottom: gestureInsetBottom),
+            ),
+            child: Scaffold(
+              body: LecturePlayer(
+                videoUrl: 'https://example.invalid/playlist.m3u8',
+                overlayVideoUrl: overlayVideoUrl,
+                title: 'TUMLive Player',
+                isFullscreen: isFullscreen,
+                extraControls: extraControls,
+                onToggleFullscreen: onToggleFullscreen,
+              ),
+            ),
           ),
         ),
       ),
@@ -603,6 +613,34 @@ void main() {
         tester.getSize(find.byKey(const ValueKey('play-pause-button'))).height,
         lessThanOrEqualTo(36),
       );
+    });
+
+    testWidgets('a fullscreen seek bar sits clear of the navigation gesture', (WidgetTester tester) async {
+      // Android gesture navigation reserves 48dp at the bottom. A drag that
+      // starts in there means "go home" and never reaches the Slider, so a
+      // seek bar flush with the screen edge backgrounds the app instead of
+      // scrubbing. immersiveSticky zeroes viewPadding while the gesture keeps
+      // firing, which is why the bar has to read systemGestureInsets and a
+      // SafeArea would not have caught this.
+      await pumpApp(tester, isFullscreen: true, gestureInsetBottom: 48);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final Rect seek = tester.getRect(find.byKey(const ValueKey('seek-bar')));
+      final Rect bar = tester.getRect(find.byKey(const ValueKey('control-bar')));
+      expect(seek.bottom, lessThanOrEqualTo(bar.bottom - 48));
+    });
+
+    testWidgets('a windowed seek bar is not pushed up by the gesture strip', (WidgetTester tester) async {
+      // Windowed, the picture is a 16:9 slot with the lecture list under it, so
+      // the bar is nowhere near the screen edge and owes the gesture nothing.
+      await pumpApp(tester, gestureInsetBottom: 48);
+      fake.completeInitialization();
+      await tester.pumpAndSettle();
+
+      final Rect seek = tester.getRect(find.byKey(const ValueKey('seek-bar')));
+      final Rect bar = tester.getRect(find.byKey(const ValueKey('control-bar')));
+      expect(seek.bottom, greaterThan(bar.bottom - 48));
     });
   });
 
