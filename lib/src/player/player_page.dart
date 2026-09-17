@@ -466,8 +466,12 @@ class _PlayerPageState extends State<PlayerPage> {
     // where in the course you were.
     final List<PlaylistEntry> siblings = data.siblings;
 
-    return ListView(
-      padding: const EdgeInsets.only(bottom: 24),
+    // A Column with the list in an Expanded, not one long ListView. Which
+    // lecture is playing, and the pin for its course, are what the page is
+    // about — scrolling the siblings should not carry them off the top. Only
+    // the list below "More in this course" moves.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 16, 4, 8),
@@ -514,6 +518,8 @@ class _PlayerPageState extends State<PlayerPage> {
             child: Text('No other lectures in this course.'),
           )
         else ...<Widget>[
+          // The heading stays with the header, above the scroll: a list of
+          // thirteen lectures whose title has scrolled away is just a list.
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(
@@ -531,14 +537,22 @@ class _PlayerPageState extends State<PlayerPage> {
             ),
           ),
           const SizedBox(height: 4),
-          for (final PlaylistEntry entry in siblings)
-            _SiblingTile(
-              entry: entry,
-              isCurrent: entry.lectureId == data.lecture.id,
-              isPlaying: _isPlaying,
-              isLoading: _switchingTo == entry.lectureId,
-              onTap: () => _openSibling(entry),
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.only(bottom: 24),
+              itemCount: siblings.length,
+              itemBuilder: (BuildContext context, int i) {
+                final PlaylistEntry entry = siblings[i];
+                return _SiblingTile(
+                  entry: entry,
+                  isCurrent: entry.lectureId == data.lecture.id,
+                  isPlaying: _isPlaying,
+                  isLoading: _switchingTo == entry.lectureId,
+                  onTap: () => _openSibling(entry),
+                );
+              },
             ),
+          ),
         ],
       ],
     );

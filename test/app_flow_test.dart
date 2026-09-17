@@ -36,6 +36,7 @@ http.Client fakeTumLive({
   List<bool>? pinCalls,
   List<String> pinnedSlugs = const <String>[],
   List<int> liveCourseIds = const <int>[],
+  int extraSiblings = 0,
 }) {
   Map<String, dynamic> lectureWithoutVideo(int id) => <String, dynamic>{
     'id': id,
@@ -193,6 +194,15 @@ http.Client fakeTumLive({
             'start': '2025-10-14T08:00:00Z',
             'watched': true,
           },
+          // Enough rows to overflow a phone, for the tests that need the
+          // sibling list to actually scroll.
+          for (int i = 0; i < extraSiblings; i++)
+            <String, dynamic>{
+              'streamId': 200 + i,
+              'courseSlug': 'analysis',
+              'streamName': 'Lecture',
+              'start': '2025-09-${(i % 28) + 1}T08:00:00Z',
+            },
         ],
       };
     } else if (path.contains('/streams/')) {
@@ -939,6 +949,35 @@ void main() {
 
     expect(find.text('Live course 500'), findsOneWidget);
     expect(find.text('Live course 999'), findsOneWidget);
+  });
+
+  testWidgets('scrolling the sibling list leaves the lecture header put',
+      (WidgetTester tester) async {
+    // The header says which lecture is playing and carries the pin for its
+    // course. Both used to sit in the same ListView as the siblings and
+    // scrolled away with them.
+    // A phone, and enough siblings to overflow it. On a tall test surface the
+    // whole page fits, nothing scrolls, and the assertion below passes however
+    // the page is built.
+    useNarrowPhone(tester);
+    await pumpApp(tester, fakeTumLive(extraSiblings: 20));
+    await tester.tap(find.text('Analysis for Informatics'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('21.10.2025'));
+    await tester.pumpAndSettle();
+
+    final Finder header = find.text('More in this course');
+    expect(header, findsOneWidget);
+    final double before = tester.getRect(header).top;
+
+    await tester.drag(
+      find.byType(ListView).last,
+      const Offset(0, -200),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // The heading has not moved, so neither has anything above it.
+    expect(tester.getRect(header).top, closeTo(before, 0.5));
   });
 
   testWidgets('a failing server shows a retry instead of a blank screen',
