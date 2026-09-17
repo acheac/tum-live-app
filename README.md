@@ -1,6 +1,6 @@
 # TUMLive Player
 
-[Download android apk here](https://github.com/user-attachments/files/32320502/app-release.apk.zip)
+[Download android apk here](https://github.com/acheac/tum-live-app/releases/download/TumLive_Player/app-release.apk)
 
 A third-party client for [TUM-Live](https://tum.live), TUM's lecture recording
 service. Browse courses by semester, watch recordings, and pick up where you
